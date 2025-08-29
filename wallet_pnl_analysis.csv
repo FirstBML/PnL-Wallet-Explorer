@@ -1,0 +1,5 @@
+block_time,tx_identifier,token_address,amount,type,blockchain,date,coingecko_id,price_at_tx,usd_value,realized_pnl
+2025-07-17 05:10:09,2025-07-17 05:10:09_optimism_0,0x7f5c764cbc14f9669b88837ca1490cca17c31607,100.0,in,optimism,2025-07-17,bridged-usd-coin-optimism,,,0
+2025-07-17 05:10:09,2025-07-17 05:10:09_optimism_0,0x4200000000000000000000000000000000000042,-250.0,out,optimism,2025-07-17,rss3,,,0
+2025-08-03 06:43:19,2025-08-03 06:43:19_bnb_1,0xe9e7cea3dedca5984780bafc599bd69add087d56,50.0,in,bnb,2025-08-03,binance-peg-busd,,,0
+2025-08-03 06:43:19,2025-08-03 06:43:19_bnb_1,0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c,-0.2,out,bnb,2025-08-03,wbnb,,,0
