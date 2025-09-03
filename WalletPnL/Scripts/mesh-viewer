@@ -1,0 +1,6 @@
+#!C:\Users\g\Documents\PnL Wallet Explorer\WalletPnL\Scripts\python.exe
+import sys
+from dune.mesh.gui import viewer
+	
+if __name__ == '__main__':
+	viewer.main(sys.argv)

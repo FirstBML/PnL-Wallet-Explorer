@@ -1,0 +1,5 @@
+#!C:\Users\g\Documents\PnL Wallet Explorer\WalletPnL\Scripts\python.exe
+from dune.mesh.converter import tetgen2dgf
+	
+if __name__ == '__main__':
+	tetgen2dgf.main()

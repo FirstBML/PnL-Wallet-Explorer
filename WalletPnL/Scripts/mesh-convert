@@ -1,0 +1,28 @@
+#!C:\Users\g\Documents\PnL Wallet Explorer\WalletPnL\Scripts\python.exe
+"""
+mesh-convert.py (c) 2012 rene.milk@uni-muenster.de
+
+It is licensed to you under the terms of the WTFPLv2.
+"""
+
+import sys
+from dune.mesh import Mesh
+
+usage = 'usage: %s from_filename to_filename'
+
+def convert(from_filename,to_filename):
+	m = Mesh(3)
+	m.parse( from_filename )
+	fn2 = m.write( to_filename )
+	assert fn2 == to_filename
+	
+if __name__ == '__main__':
+	convert( sys.argv[1], sys.argv[2] )
+	try:
+		convert( sys.argv[1], sys.argv[2] )
+
+	except Exception,e:
+		print 'conversion failed, exception was:'
+		print e
+		print usage%sys.argv[0]
+		
