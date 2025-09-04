@@ -240,35 +240,31 @@ def main():
         st.stop()
 
     # -------------------------------
-    # Summary cards
+    # Summary cards (NEW st.metric version)
     # -------------------------------
     total_in = float(df[df["transaction_type"] == "deposit"]["usd_value"].sum())
     total_out = float(df[df["transaction_type"] == "withdrawal"]["usd_value"].sum())
     gas_cost = float(df.get("gas_cost_usd", pd.Series()).fillna(0).sum()) if "gas_cost_usd" in df else 0.0
     pnl = total_in - total_out - gas_cost
 
-    cols_html = (
-        card("Total Deposits (USD)", f"${total_in:,.2f}") +
-        card("Total Withdrawals (USD)", f"${total_out:,.2f}") +
-        card("Gas Costs (USD)", f"${gas_cost:,.2f}") +
-        card("Net PnL (USD)", f"${pnl:,.2f}")
-    )
     st.markdown("### 📈 Summary")
-    st.markdown(f'<div class="card-row">{cols_html}</div>', unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Deposits (USD)", f"${total_in:,.2f}")
+    col2.metric("Total Withdrawals (USD)", f"${total_out:,.2f}")
+    col3.metric("Gas Costs (USD)", f"${gas_cost:,.2f}")
+    col4.metric("Net PnL (USD)", f"${pnl:,.2f}")
 
     # -------------------------------
-    # PnL Analysis
+    # PnL Analysis (NEW st.metric version)
     # -------------------------------
     realized, unrealized, breakdown = calculate_pnl(df, method=pnl_method)
-    pnl_cards = (
-        card(f"{pnl_method} Realized PnL (USD)", f"${realized:,.2f}") +
-        card(f"{pnl_method} Unrealized PnL (USD)", f"${unrealized:,.2f}") +
-        card("Positions (Open Lots)", f"{int((breakdown['remaining_amount']>0).sum()) if 'remaining_amount' in breakdown.columns else 0}")
-    )
-    st.markdown("### 💹 PnL Analysis")
-    st.markdown(f'<div class="pnl-row">{pnl_cards}</div>', unsafe_allow_html=True)
 
-    st.dataframe(breakdown, use_container_width=True, height=320)
+    st.markdown("### 💹 PnL Analysis")
+    col1, col2, col3 = st.columns(3)
+    col1.metric(f"{pnl_method} Realized PnL (USD)", f"${realized:,.2f}")
+    col2.metric(f"{pnl_method} Unrealized PnL (USD)", f"${unrealized:,.2f}")
+    open_positions = int((breakdown["remaining_amount"] > 0).sum()) if "remaining_amount" in breakdown.columns else 0
+    col3.metric("Positions (Open Lots)", f"{open_positions}")
 
     # -------------------------------
     # Transactions table

@@ -1,5 +1,12 @@
 # Created by venv; see https://docs.python.org/3/library/venv.html
+.env
 * .env
 WalletPnL/
 joblist.csv/
 joblist.pkl/
+address_to_cgid.json/
+moralis_cache/
+moralis_wallets.json/
+wallet_pnl_analysis.json/
+moralis_wallets_data.json/
+.streamlit/
