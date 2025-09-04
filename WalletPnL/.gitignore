@@ -10,4 +10,4 @@ moralis_wallets.json/
 wallet_pnl_analysis.json/
 moralis_wallets_data.json/
 .streamlit/
-secrets/
+.streamlit/secrets.toml/
