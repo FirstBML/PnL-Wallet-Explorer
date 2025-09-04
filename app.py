@@ -8,6 +8,56 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from analyzer import ExtendedMoralisAnalyzer, calculate_pnl
 
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+
+# -------------------------------
+# Synthetic extended demo data
+# -------------------------------
+def generate_sample_data(n_days=7, txs_per_day=7):
+    np.random.seed(42)  # reproducible
+    rows = []
+    start_date = datetime.today() - timedelta(days=n_days)
+
+    tokens = [
+        ("USDC", 1.0),
+        ("USDT", 1.0),
+        ("ETH", 2000.0),
+        ("ARB", 3.0),
+        ("OP", 3.5),
+        ("MATIC", 0.7),
+    ]
+    chains = ["eth", "arbitrum", "optimism", "polygon"]
+
+    for d in range(n_days):
+        for t in range(txs_per_day):
+            block_time = start_date + timedelta(days=d, hours=np.random.randint(0, 24))
+            token, base_price = tokens[np.random.randint(len(tokens))]
+            price = round(base_price * np.random.uniform(0.9, 1.1), 2)  # small price variation
+            amount = round(np.random.uniform(10, 1000), 2) if token in ["USDC", "USDT"] else round(np.random.uniform(0.1, 20), 4)
+
+            tx_type = np.random.choice(["deposit", "withdrawal"])
+            usd_value = amount * price * (1 if tx_type == "deposit" else -1)
+
+            rows.append({
+                "block_time": block_time,
+                "blockchain": np.random.choice(chains),
+                "transaction_type": tx_type,
+                "usd_value": abs(usd_value),
+                "gas_cost_usd": round(np.random.uniform(1, 20), 2),
+                "token_symbol": token,
+                "token_amount": amount,
+                "token_price_usd": price,
+            })
+
+    return pd.DataFrame(rows)
+
+# Create ~50 transactions across a week
+sample_df = generate_sample_data(n_days=7, txs_per_day=7)
+
+
+
 # -------------------------------
 # Setup
 # -------------------------------
@@ -112,9 +162,6 @@ def card(label: str, value: str) -> str:
     </div>
     """
 
-# -------------------------------
-# App
-# -------------------------------
 def main():
     st.title("💰 Wallet PnL Explorer")
     st.markdown(CARD_CSS, unsafe_allow_html=True)
@@ -122,14 +169,13 @@ def main():
     # Sidebar: controls
     st.sidebar.header("🔧 Controls")
     cache_mode = st.sidebar.radio("Cache Mode", ["Always Use Cache", "Force Refresh", "Disable Cache"], index=0)
-    pnl_method = st.sidebar.selectbox("PnL Accounting Method", ["FIFO", "LIFO"], index=0)  # default FIFO (your request)
-    wallet_address = st.sidebar.text_input("Wallet Address", value="", help="Leave empty to preview Vitalik by default.")
+    pnl_method = st.sidebar.selectbox("PnL Accounting Method", ["FIFO", "LIFO","ACB"], index=0)  # default FIFO
+    wallet_address = st.sidebar.text_input("Wallet Address", value="", help="Leave empty to preview demo data.")
     selected_chains = st.sidebar.multiselect(
         "Blockchains",
         ["eth", "bsc", "polygon", "arbitrum", "optimism", "base"],
         default=["eth", "arbitrum", "optimism"]
     )
-    # Date selectors: for default wallet we’ll override to last 7 days
     start_date = st.sidebar.date_input("Start Date", value=(datetime.utcnow() - timedelta(days=30)).date())
     end_date = st.sidebar.date_input("End Date", value=datetime.utcnow().date())
     max_txs = st.sidebar.slider("Max transactions per chain", min_value=10, max_value=200, value=50, step=10)
@@ -146,62 +192,55 @@ def main():
         analyzer = ExtendedMoralisAnalyzer(API_KEY, use_cache=False)
         force_refresh = False
 
-    # Decide wallet and date window
-    default_wallet = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"
-    using_default = False
+    # -------------------------------
+    # Wallet selection
+    # -------------------------------
     if analyze_button and wallet_address.strip():
+        # Real wallet path
         chosen_wallet = wallet_address.strip()
+        using_default = False
         window_start = datetime.combine(start_date, datetime.min.time())
         window_end = datetime.combine(end_date, datetime.max.time())
     else:
-        # Default Vitalik view → last 7 days & only tokens with prices
-        chosen_wallet = default_wallet
+        # Demo mode
+        chosen_wallet = "sample_wallet"
         using_default = True
-        window_end = datetime.utcnow()
-        window_start = window_end - timedelta(days=2)
-        st.info(" Analysis for Vitalik’s:Last 3 days.")
+        window_start = sample_df["block_time"].min()
+        window_end = sample_df["block_time"].max()
+        st.info("💡 Showing sample wallet preview. Enter your wallet on the left to analyze real data.")
 
-    # Safety: at least one chain selected
     if not selected_chains:
         st.warning("Please select at least one blockchain in the sidebar.")
         st.stop()
 
     # -------------------------------
-    # Fetch with progress feedback
+    # Fetch or load data
     # -------------------------------
-    progress = st.progress(0, text="Preparing analysis...")
-    time.sleep(0.1)
-
-    progress.progress(10, text="Checking cache / fetching data...")
-    df = get_wallet_data(analyzer, chosen_wallet, selected_chains, max_txs, force_refresh=(cache_mode == "Force Refresh"))
-    progress.progress(50, text="Applying filters...")
-
-    if df.empty:
-        progress.empty()
-        st.error("No transactions found.")
-        st.stop()
-
-    # Date filter
-    df = df[(df["block_time"] >= pd.to_datetime(window_start)) & (df["block_time"] <= pd.to_datetime(window_end))]
-
-    # Default view: only tokens with prices
     if using_default:
-        if "price_usd" in df.columns:
-            df = df[df["price_usd"].fillna(0) > 0]
+        df = sample_df.copy()
+    else:
+        progress = st.progress(0, text="Preparing analysis...")
+
+        progress.progress(20, text="Checking cache / fetching data...")
+        df = get_wallet_data(analyzer, chosen_wallet, selected_chains, max_txs, force_refresh=force_refresh)
+
+        progress.progress(50, text="Applying filters...")
+        if df.empty:
+            progress.empty()
+            st.error("No transactions found for this wallet.")
+            st.stop()
+
+        # Date filter
+        df = df[(df["block_time"] >= pd.to_datetime(window_start)) & (df["block_time"] <= pd.to_datetime(window_end))]
+
+        progress.progress(70, text="Computing summaries and PnL...")
 
     if df.empty:
-        progress.empty()
-        st.warning("No transactions found after applying filters.")
+        st.warning("⚠️ No transactions available after filters.")
         st.stop()
 
-    # Ensure gas USD exists (if analyzer didn’t already)
-    if "gas_cost_usd" not in df.columns:
-        df["gas_cost_usd"] = df.get("gas_cost_native", pd.Series([0]*len(df))).fillna(0) * df.get("native_price_usd", 0)
-
-    progress.progress(70, text="Computing summaries and PnL...")
-
     # -------------------------------
-    # Summary cards (horizontal)
+    # Summary cards
     # -------------------------------
     total_in = float(df[df["transaction_type"] == "deposit"]["usd_value"].sum())
     total_out = float(df[df["transaction_type"] == "withdrawal"]["usd_value"].sum())
@@ -218,7 +257,7 @@ def main():
     st.markdown(f'<div class="card-row">{cols_html}</div>', unsafe_allow_html=True)
 
     # -------------------------------
-    # PnL Analysis (horizontal) – default shows FIFO (your request)
+    # PnL Analysis
     # -------------------------------
     realized, unrealized, breakdown = calculate_pnl(df, method=pnl_method)
     pnl_cards = (
@@ -229,15 +268,7 @@ def main():
     st.markdown("### 💹 PnL Analysis")
     st.markdown(f'<div class="pnl-row">{pnl_cards}</div>', unsafe_allow_html=True)
 
-    st.dataframe(
-        breakdown,
-        use_container_width=True,
-        height=320
-    )
-
-    progress.progress(100, text="Done!")
-    time.sleep(0.1)
-    progress.empty()
+    st.dataframe(breakdown, use_container_width=True, height=320)
 
     # -------------------------------
     # Transactions table
@@ -245,14 +276,15 @@ def main():
     st.subheader("📊 Enriched Transactions")
     st.dataframe(df, use_container_width=True, height=420)
 
-    # Optional: Cache file explorer
-    with st.expander("📂 View local cache files"):
-        files = glob.glob(os.path.join(_wallet_dir(chosen_wallet), "*.parquet"))
-        if files:
-            st.write("Cached chains for this wallet:")
-            st.write([os.path.basename(f) for f in files])
-        else:
-            st.write("No cache files yet for this wallet.")
+    if not using_default:
+        with st.expander("📂 View local cache files"):
+            files = glob.glob(os.path.join(_wallet_dir(chosen_wallet), "*.parquet"))
+            st.write([os.path.basename(f) for f in files]) if files else st.write("No cache files yet.")
+
+    if not using_default:
+        progress.progress(100, text="Done!")
+        time.sleep(0.1)
+        progress.empty()
 
 if __name__ == "__main__":
     main()

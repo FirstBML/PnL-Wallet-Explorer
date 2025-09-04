@@ -222,59 +222,96 @@ class ExtendedMoralisAnalyzer:
         return df.sort_values("block_time").reset_index(drop=True)
 
 # -------------------------------
-# PnL Calculation Helper
+# PnL Calculation Helper (FIFO, LIFO, ACB)
 # -------------------------------
 def calculate_pnl(df, method="FIFO"):
-    positions = {}  # token -> list of lots (qty, cost per unit)
+    positions = {}  # token -> list of lots (for FIFO/LIFO)
+    avg_costs = {}  # token -> (total_qty, avg_cost_per_unit) for ACB
     realized_pnl = 0
-    token_realized = {}  # token -> realized pnl
-    token_unrealized = {}  # token -> unrealized pnl
+    token_realized = {}
+    token_unrealized = {}
 
     for _, row in df.sort_values("block_time").iterrows():
         token = row["token_symbol"]
-        qty = row["amount"]
+        qty = row.get("amount", row.get("token_amount", 0))
         usd_value = row["usd_value"]
 
-        if row["transaction_type"] in ["deposit", "buy", "swap_in"]:
-            cost_per_unit = usd_value / qty if qty else 0
-            lot = {"qty": qty, "cost": cost_per_unit}
-            positions.setdefault(token, []).append(lot)
+        if qty == 0:
+            continue
 
-        elif row["transaction_type"] in ["withdrawal", "sell", "swap_out"]:
-            remaining = qty
-            while remaining > 0 and token in positions and positions[token]:
-                lot = positions[token][0] if method == "FIFO" else positions[token][-1]
-                lot_qty = lot["qty"]
-                consumed = min(remaining, lot_qty)
+        if method in ["FIFO", "LIFO"]:
+            # Lot-based methods
+            if row["transaction_type"] in ["deposit", "buy", "swap_in"]:
+                cost_per_unit = usd_value / qty
+                lot = {"qty": qty, "cost": cost_per_unit}
+                positions.setdefault(token, []).append(lot)
 
-                sell_per_unit = usd_value / qty if qty else 0
-                pnl_piece = consumed * (sell_per_unit - lot["cost"])
+            elif row["transaction_type"] in ["withdrawal", "sell", "swap_out"]:
+                remaining = qty
+                sell_per_unit = usd_value / qty
+                while remaining > 0 and token in positions and positions[token]:
+                    lot = positions[token][0] if method == "FIFO" else positions[token][-1]
+                    lot_qty = lot["qty"]
+                    consumed = min(remaining, lot_qty)
 
-                realized_pnl += pnl_piece
-                token_realized[token] = token_realized.get(token, 0) + pnl_piece
+                    pnl_piece = consumed * (sell_per_unit - lot["cost"])
+                    realized_pnl += pnl_piece
+                    token_realized[token] = token_realized.get(token, 0) + pnl_piece
 
-                lot["qty"] -= consumed
-                remaining -= consumed
-                if lot["qty"] == 0:
-                    if method == "FIFO":
-                        positions[token].pop(0)
-                    else:
-                        positions[token].pop(-1)
+                    lot["qty"] -= consumed
+                    remaining -= consumed
+                    if lot["qty"] == 0:
+                        if method == "FIFO":
+                            positions[token].pop(0)
+                        else:
+                            positions[token].pop(-1)
 
+        elif method == "ACB":
+            # Average Cost Basis method
+            total_qty, avg_cost = avg_costs.get(token, (0, 0))
+
+            if row["transaction_type"] in ["deposit", "buy", "swap_in"]:
+                # New weighted average
+                new_total_qty = total_qty + qty
+                new_total_cost = (total_qty * avg_cost) + usd_value
+                new_avg_cost = new_total_cost / new_total_qty if new_total_qty > 0 else 0
+                avg_costs[token] = (new_total_qty, new_avg_cost)
+
+            elif row["transaction_type"] in ["withdrawal", "sell", "swap_out"]:
+                if total_qty > 0:
+                    sell_per_unit = usd_value / qty
+                    pnl_piece = qty * (sell_per_unit - avg_cost)
+                    realized_pnl += pnl_piece
+                    token_realized[token] = token_realized.get(token, 0) + pnl_piece
+
+                    # Reduce holdings
+                    new_total_qty = total_qty - qty
+                    avg_costs[token] = (max(new_total_qty, 0), avg_cost)
+
+    # -------------------------------
     # Unrealized PnL
+    # -------------------------------
     unrealized_pnl = 0
-    for token, lots in positions.items():
-        if "price_usd" in df.columns and not df[df["token_symbol"] == token].empty:
-            current_price = df[df["token_symbol"] == token]["price_usd"].iloc[-1]
-        else:
-            current_price = 0
-        for lot in lots:
-            pnl_piece = lot["qty"] * (current_price - lot["cost"])
+    token_data = []
+
+    if method in ["FIFO", "LIFO"]:
+        for token, lots in positions.items():
+            current_price = df[df["token_symbol"] == token]["price_usd"].iloc[-1] if "price_usd" in df.columns else 0
+            for lot in lots:
+                pnl_piece = lot["qty"] * (current_price - lot["cost"])
+                unrealized_pnl += pnl_piece
+                token_unrealized[token] = token_unrealized.get(token, 0) + pnl_piece
+
+    elif method == "ACB":
+        for token, (total_qty, avg_cost) in avg_costs.items():
+            current_price = df[df["token_symbol"] == token]["price_usd"].iloc[-1] if "price_usd" in df.columns else 0
+            pnl_piece = total_qty * (current_price - avg_cost)
             unrealized_pnl += pnl_piece
             token_unrealized[token] = token_unrealized.get(token, 0) + pnl_piece
 
-    # Build token breakdown DataFrame
-    token_data = []
+    # -------------------------------
+    # Build breakdown DataFrame
+    # -------------------------------
     all_tokens = set(token_realized.keys()).union(set(token_unrealized.keys()))
     for token in all_tokens:
         token_data.append({
