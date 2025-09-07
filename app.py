@@ -17,6 +17,13 @@ import traceback
 import plotly.express as px
 import matplotlib.pyplot as plt
 
+# Set page config first
+st.set_page_config(
+    page_title="Wallet PnL Explorer", 
+    page_icon="💰", 
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # Sample Data
 def generate_sample_data(n_days=7, txs_per_day=7, wallet_address="0xDEADBEEF1234567890ABCDEF1234567890ABCDEF"):
@@ -101,7 +108,6 @@ sample_df = generate_sample_data(n_days=7, txs_per_day=7)
 # -------------------------------
 # Setup
 # -------------------------------
-st.set_page_config(page_title="Wallet PnL Explorer", page_icon="💰", layout="wide")
 load_dotenv()
 API_KEY = os.getenv("MORALIS_API_KEY")
 if not API_KEY:
@@ -156,11 +162,28 @@ def get_wallet_data(_analyzer, wallet: str, chains: list, max_txs: int, force_re
         return pd.concat(dfs, ignore_index=True)
     return pd.DataFrame()
 
-def main():
-    st.title("Wallet PnL Explorer")
-    st.sidebar.header("🔧 Controls")
+# -------------------------------
+# Navigation setup
+# -------------------------------
+def setup_navigation():
+    st.sidebar.title("💰 Wallet PnL Explorer")
+    st.sidebar.markdown("---")
+    
+    # Page selection
+    page = st.sidebar.radio(
+        "Navigate to:",
+        ["Dashboard", "PnL Analysis", "Transactions", "Settings & Diagnostics"],
+        index=0
+    )
+    
+    return page
 
-    # Sidebar controls
+# -------------------------------
+# Sidebar controls (shared across pages)
+# -------------------------------
+def setup_sidebar():
+    st.sidebar.header("🔧 Controls")
+    
     diagnostic_mode = st.sidebar.checkbox("Enable Diagnostic Mode", value=False)
     pnl_method = st.sidebar.selectbox("PnL Accounting Method", ["FIFO", "LIFO", "ACB"], index=0)
     wallet_address = st.sidebar.text_input("Wallet Address", value="", help="Leave empty to preview demo data.")
@@ -174,12 +197,28 @@ def main():
     max_txs = st.sidebar.slider("Max transactions per chain", min_value=10, max_value=200, value=50, step=10)
     cache_mode = st.sidebar.radio("Cache Mode", ["Always Use Cache", "Force Refresh", "Disable Cache"], index=0)
     analyze_button = st.sidebar.button("🔍 Analyze Wallet")
+    
+    return {
+        "diagnostic_mode": diagnostic_mode,
+        "pnl_method": pnl_method,
+        "wallet_address": wallet_address,
+        "selected_chains": selected_chains,
+        "start_date": start_date,
+        "end_date": end_date,
+        "max_txs": max_txs,
+        "cache_mode": cache_mode,
+        "analyze_button": analyze_button
+    }
 
+# -------------------------------
+# Data loading function
+# -------------------------------
+def load_data(sidebar_params):
     # Initialize analyzer
-    if cache_mode == "Always Use Cache":
+    if sidebar_params["cache_mode"] == "Always Use Cache":
         analyzer = ExtendedMoralisAnalyzer(API_KEY, use_cache=True, force_refresh=False)
         force_refresh = False
-    elif cache_mode == "Force Refresh":
+    elif sidebar_params["cache_mode"] == "Force Refresh":
         analyzer = ExtendedMoralisAnalyzer(API_KEY, use_cache=True, force_refresh=True)
         force_refresh = True
     else:
@@ -187,11 +226,11 @@ def main():
         force_refresh = False
 
     # Determine wallet mode
-    if analyze_button and wallet_address.strip():
-        chosen_wallet = wallet_address.strip()
+    if sidebar_params["analyze_button"] and sidebar_params["wallet_address"].strip():
+        chosen_wallet = sidebar_params["wallet_address"].strip()
         using_default = False
-        window_start = datetime.combine(start_date, datetime.min.time())
-        window_end = datetime.combine(end_date, datetime.max.time())
+        window_start = datetime.combine(sidebar_params["start_date"], datetime.min.time())
+        window_end = datetime.combine(sidebar_params["end_date"], datetime.max.time())
     else:
         chosen_wallet = "sample_wallet"
         using_default = True
@@ -199,9 +238,9 @@ def main():
         window_end = sample_df["block_time"].max()
         st.info("💡 Sample wallet preview for the past 7 days: Enter your wallet on the left to analyze real data.")
 
-    if not selected_chains:
+    if not sidebar_params["selected_chains"]:
         st.warning("Please select at least one blockchain in the sidebar.")
-        st.stop()
+        return None, None, None, None, None, None, None, None
 
     # Fetch/load wallet data
     if using_default:
@@ -209,13 +248,13 @@ def main():
     else:
         progress = st.progress(0, text="Preparing analysis...")
         progress.progress(20, text="Checking cache / fetching data...")
-        df = get_wallet_data(analyzer, chosen_wallet, selected_chains, max_txs, force_refresh=force_refresh)
+        df = get_wallet_data(analyzer, chosen_wallet, sidebar_params["selected_chains"], sidebar_params["max_txs"], force_refresh=force_refresh)
         progress.progress(50, text="Applying filters...")
 
         if df.empty:
             progress.empty()
             st.error("No transactions found for this wallet.")
-            st.stop()
+            return None, None, None, None, None, None, None, None
 
         # Ensure UTC datetime
         if df["block_time"].dt.tz is None:
@@ -241,28 +280,18 @@ def main():
 
     if df.empty:
         st.warning("⚠️ No transactions available after filters.")
-        st.stop()
+        return None, None, None, None, None, None, None, None
 
-    # -------------------------------
-    # Summary metrics
-    # -------------------------------
+    # Calculate PnL
     total_in = float(df[df["transaction_type"] == "deposit"]["usd_value"].sum())
     total_out = float(df[df["transaction_type"] == "withdrawal"]["usd_value"].sum())
     gas_cost = float(df.get("gas_cost_usd", pd.Series()).fillna(0).sum()) if "gas_cost_usd" in df else 0.0
     pnl = total_in - total_out - gas_cost
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Deposits (USD)", f"${total_in:,.2f}")
-    col2.metric("Total Withdrawals (USD)", f"${total_out:,.2f}")
-    col3.metric("Gas Costs (USD)", f"${gas_cost:,.2f}")
-    col4.metric("Net Cash Flow (USD)", f"${pnl:,.2f}")
-
-        # -------------------------------
     # PnL calculation with current prices
-    # -------------------------------
     realized_total = 0.0
     unrealized_total = 0.0
-    total_gas_costs = 0.0  # NEW: Track total gas costs from PnL calculation
+    total_gas_costs = 0.0
     breakdown_list = []
 
     # Group by token_symbol for sample data, token_address for real data
@@ -294,15 +323,13 @@ def main():
                     return result
             
             mock_analyzer = MockAnalyzer()
-            # UPDATED: Unpack 4 values instead of 3
-            realized, unrealized, gas_costs, breakdown = calculate_pnl_improved(group_valid, method=pnl_method, analyzer=mock_analyzer)
+            realized, unrealized, gas_costs, breakdown = calculate_pnl_improved(group_valid, method=sidebar_params["pnl_method"], analyzer=mock_analyzer)
         else:
-            # UPDATED: Unpack 4 values instead of 3
-            realized, unrealized, gas_costs, breakdown = calculate_pnl_improved(group_valid, method=pnl_method, analyzer=analyzer)
+            realized, unrealized, gas_costs, breakdown = calculate_pnl_improved(group_valid, method=sidebar_params["pnl_method"], analyzer=analyzer)
 
         realized_total += realized
         unrealized_total += unrealized
-        total_gas_costs += gas_costs  # NEW: Accumulate gas costs
+        total_gas_costs += gas_costs
         breakdown_list.append(breakdown)
 
     # Combine breakdowns into one DataFrame
@@ -311,49 +338,6 @@ def main():
     else:
         breakdown_df = pd.DataFrame()
 
-    if tokens_with_missing_prices:
-        st.warning(f"Tokens excluded from PnL due to missing prices: {tokens_with_missing_prices}")
-
-        # ... your existing PnL calculation code ...
-
-    # Combine breakdowns into one DataFrame
-    if breakdown_list:
-        breakdown_df = pd.concat(breakdown_list, ignore_index=True)
-    else:
-        breakdown_df = pd.DataFrame()
-
-    if tokens_with_missing_prices:
-        st.warning(f"Tokens excluded from PnL due to missing prices: {tokens_with_missing_prices}")
-
-    # -------------------------------
-    # PnL Validation - UPDATED to include gas costs
-    # -------------------------------
-    validation_df = validate_pnl_calculation(
-        df[df[group_key].isin(tokens_with_valid_prices)], 
-        realized_total, 
-        unrealized_total, 
-        total_gas_costs,
-        breakdown_df
-    )
-    failed_validations = validation_df[validation_df['Pass'] == False]
-
-    if not failed_validations.empty:
-        st.warning("⚠️ PnL Validation Issues Detected")
-        with st.expander("View Validation Details", expanded=True):
-            st.dataframe(validation_df, use_container_width=True)
-            st.write("**Issues found:**")
-            for _, row in failed_validations.iterrows():
-                st.write(f"- {row['Check']}: Failed")
-    else:
-        st.success("✅ PnL Calculations Validated Successfully")
-        with st.expander("View Validation Details"):
-            st.dataframe(validation_df, use_container_width=True)
-  
-    # -------------------------------
-    # Gauge and Speedometer Charts
-    # -------------------------------
-    st.subheader("📊 Portfolio Performance Dashboard")
-
     # Calculate overall PnL
     overall_pnl = realized_total + unrealized_total - total_gas_costs
     total_invested = total_in if total_in > 0 else 1  # Avoid division by zero
@@ -361,13 +345,26 @@ def main():
     # Calculate ROI percentage
     roi_percentage = (overall_pnl / total_invested) * 100 if total_invested > 0 else 0
 
-    # Create two columns for side-by-side charts
+    return df, realized_total, unrealized_total, total_gas_costs, overall_pnl, roi_percentage, breakdown_df, total_invested
+
+# -------------------------------
+# Dashboard Page
+# -------------------------------
+def dashboard_page(df, realized_total, unrealized_total, total_gas_costs, overall_pnl, roi_percentage, breakdown_df, total_invested):
+    st.header("📊 Portfolio Performance Dashboard")
+    
+    # Summary metrics
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Invested (USD)", f"${total_invested:,.2f}")
+    col2.metric("Current Value (USD)", f"${total_invested + unrealized_total:,.2f}")
+    col3.metric("Net PnL (USD)", f"${overall_pnl:,.2f}")
+    col4.metric("ROI", f"{roi_percentage:+.1f}%")
+    
+    # Gauge and Speedometer Charts
     gauge_col, speedometer_col = st.columns(2)
 
     with gauge_col:
-        # -------------------------------
         # Gauge Chart
-        # -------------------------------
         st.write("**💰 PnL Gauge**")
         
         # Determine gauge color
@@ -407,9 +404,7 @@ def main():
             st.info("⚖️ Break Even")
 
     with speedometer_col:
-        # -------------------------------
         # Speedometer Chart
-        # -------------------------------
         st.write("**🚀 ROI Speedometer**")
         
         # Determine speedometer color and ranges
@@ -464,45 +459,7 @@ def main():
         else:
             st.error("🔻 Needs Improvement")
 
-    # -------------------------------
-    # Performance Metrics Below Charts
-    # -------------------------------
-    st.write("---")
-    st.write("**📈 Performance Metrics**")
-
-    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-    with metric_col1:
-        st.metric("Total Invested", f"${total_invested:,.2f}")
-    with metric_col2:
-        st.metric("Current Value", f"${total_invested + unrealized_total:,.2f}")
-    with metric_col3:
-        st.metric("Net PnL", f"${overall_pnl:,.2f}")
-    with metric_col4:
-        st.metric("ROI", f"{roi_percentage:+.1f}%")
-
-    # -------------------------------
-    # Detailed Breakdown
-    # -------------------------------
-    with st.expander("📋 Detailed Breakdown"):
-        detail_col1, detail_col2, detail_col3 = st.columns(3)
-        with detail_col1:
-            st.write("**Realized PnL**")
-            st.metric("Amount", f"${realized_total:,.2f}")
-            st.metric("% of Investment", f"{(realized_total/total_invested)*100:+.1f}%" if total_invested > 0 else "N/A")
-        
-        with detail_col2:
-            st.write("**Unrealized PnL**")
-            st.metric("Amount", f"${unrealized_total:,.2f}")
-            st.metric("% of Investment", f"{(unrealized_total/total_invested)*100:+.1f}%" if total_invested > 0 else "N/A")
-        
-        with detail_col3:
-            st.write("**Costs & Efficiency**")
-            st.metric("Gas Costs", f"${total_gas_costs:,.2f}")
-            st.metric("Cost Ratio", f"{(total_gas_costs/total_invested)*100:.1f}%" if total_invested > 0 else "N/A")
-
-    # -------------------------------
     # Performance Assessment
-    # -------------------------------
     st.write("---")
     st.write("**📊 Performance Assessment**")
 
@@ -548,302 +505,425 @@ def main():
         - Urgent portfolio review needed
         - Consider professional advice
         """)
-    # -------------------------------
-    # PnL Validation - UPDATED to include gas costs
-    # -------------------------------
-    validation_df = validate_pnl_calculation(
-        df[df[group_key].isin(tokens_with_valid_prices)], 
-        realized_total, 
-        unrealized_total, 
-        total_gas_costs,  # NEW: Pass gas costs
-        breakdown_df
-    )
-    failed_validations = validation_df[validation_df['Pass'] == False]
 
-    if not failed_validations.empty:
-        st.warning("⚠️ PnL Validation Issues Detected")
-        with st.expander("View Validation Details", expanded=True):
-            st.dataframe(validation_df, use_container_width=True)
-            st.write("**Issues found:**")
-            for _, row in failed_validations.iterrows():
-                st.write(f"- {row['Check']}: Failed")
-    else:
-        st.success("✅ PnL Calculations Validated Successfully")
-        with st.expander("View Validation Details"):
-            st.dataframe(validation_df, use_container_width=True)
-  
-    # UPDATED: Display gas costs and net PnL metrics
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric(f"{pnl_method} Realized PnL (USD)", f"${realized_total:,.2f}")
-    col2.metric(f"{pnl_method} Unrealized PnL (USD)", f"${unrealized_total:,.2f}")
-    col3.metric("Total Gas Costs (PnL)", f"${total_gas_costs:,.2f}")
-    col4.metric("Net PnL (After Gas)", f"${realized_total + unrealized_total - total_gas_costs:,.2f}")
+# -------------------------------
+# PnL Analysis Page
+# -------------------------------
+def pnl_analysis_page(realized_total, unrealized_total, total_gas_costs, overall_pnl, roi_percentage, breakdown_df, total_invested):
+    st.header("💹 PnL Analysis")
     
-    # Count open positions
-    open_positions = len(breakdown_df[breakdown_df['Current Holdings'] > 0]) if not breakdown_df.empty else 0
-    st.metric("Open Positions", f"{open_positions}")
+    # Detailed Breakdown
+    st.write("**📋 Detailed Breakdown**")
+    detail_col1, detail_col2, detail_col3 = st.columns(3)
+    with detail_col1:
+        st.write("**Realized PnL**")
+        st.metric("Amount", f"${realized_total:,.2f}")
+        st.metric("% of Investment", f"{(realized_total/total_invested)*100:+.1f}%" if total_invested > 0 else "N/A")
+    
+    with detail_col2:
+        st.write("**Unrealized PnL**")
+        st.metric("Amount", f"${unrealized_total:,.2f}")
+        st.metric("% of Investment", f"{(unrealized_total/total_invested)*100:+.1f}%" if total_invested > 0 else "N/A")
+    
+    with detail_col3:
+        st.write("**Costs & Efficiency**")
+        st.metric("Gas Costs", f"${total_gas_costs:,.2f}")
+        st.metric("Cost Ratio", f"{(total_gas_costs/total_invested)*100:.1f}%" if total_invested > 0 else "N/A")
 
-    st.subheader("💹 PnL Breakdown by Token")
+    # PnL Breakdown by Token
     if not breakdown_df.empty:
+        st.subheader("💹 PnL Breakdown by Token")
         st.dataframe(breakdown_df, use_container_width=True, height=320)
-    else:
-        st.info("No PnL data available.")
-
-    # -------------------------------
-    # Responsive Bar Charts for PnL Breakdown
-    # -------------------------------
-    if not breakdown_df.empty:
-        st.subheader("📊 PnL Breakdown by Token")
-    
-    # Check if we have enough space for side-by-side layout
-    # For web typically > 768px width is considered enough for side-by-side
-    # Streamlit doesn't have direct screen width detection, so we'll use a simple heuristic
-    enough_space = len(breakdown_df) <= 8  # Fewer tokens = more space for side-by-side
-    
-    if enough_space:
-        # Side-by-side layout
-        col1, col2 = st.columns(2)
         
-        with col1:
-            # Realized PnL Bar Chart
+        # Visualizations
+        st.subheader("📊 PnL Visualizations")
+        
+        # Check if we have enough space for side-by-side layout
+        enough_space = len(breakdown_df) <= 8
+        
+        if enough_space:
+            # Side-by-side layout
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Realized PnL Bar Chart
+                realized_chart_data = breakdown_df[['Token', 'Realized PnL (USD)']].copy()
+                realized_chart_data = realized_chart_data.sort_values('Realized PnL (USD)', ascending=True)
+                
+                st.write("**💰 Realized PnL by Token**")
+                st.bar_chart(
+                    realized_chart_data.set_index('Token'),
+                    color="#4CAF50"
+                )
+                
+                # Summary stats
+                total_realized = realized_chart_data['Realized PnL (USD)'].sum()
+                st.caption(f"Total Realized: ${total_realized:,.2f}")
+            
+            with col2:
+                # Unrealized PnL Bar Chart
+                unrealized_chart_data = breakdown_df[['Token', 'Unrealized PnL (USD)']].copy()
+                unrealized_chart_data = unrealized_chart_data.sort_values('Unrealized PnL (USD)', ascending=True)
+                
+                st.write("**📈 Unrealized PnL by Token**")
+                # Create custom colors for positive/negative
+                colors = [
+                    "#4CAF50" if x >= 0 else "#F44336" 
+                    for x in unrealized_chart_data['Unrealized PnL (USD)']
+                ]
+                
+                # Using matplotlib for better color control
+                try:
+                    import matplotlib.pyplot as plt
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    tokens = unrealized_chart_data['Token']
+                    values = unrealized_chart_data['Unrealized PnL (USD)']
+                    
+                    colors = ['#4CAF50' if x >= 0 else '#F44336' for x in values]
+                    
+                    bars = ax.barh(tokens, values, color=colors)
+                    ax.set_xlabel('Unrealized PnL (USD)')
+                    ax.set_title('Unrealized PnL by Token')
+                    
+                    # Add value labels on bars
+                    for bar in bars:
+                        width = bar.get_width()
+                        label_x_pos = width + (0.01 * max(values)) if width >= 0 else width - (0.01 * abs(min(values)))
+                        ax.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
+                               f'${width:,.0f}', ha='left' if width >= 0 else 'right', va='center')
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    
+                except ImportError:
+                    # Fallback to streamlit bar chart
+                    st.bar_chart(
+                        unrealized_chart_data.set_index('Token'),
+                        color=colors
+                    )
+                
+                # Summary stats
+                total_unrealized = unrealized_chart_data['Unrealized PnL (USD)'].sum()
+                st.caption(f"Total Unrealized: ${total_unrealized:,.2f}")
+        
+        else:
+            # Stacked layout (not enough space)
+            # Realized PnL Bar Chart - Top
+            st.write("**💰 Realized PnL by Token**")
             realized_chart_data = breakdown_df[['Token', 'Realized PnL (USD)']].copy()
             realized_chart_data = realized_chart_data.sort_values('Realized PnL (USD)', ascending=True)
             
-            st.write("**💰 Realized PnL by Token**")
             st.bar_chart(
                 realized_chart_data.set_index('Token'),
-                color="#4CAF50"  # Green for realized gains
+                color="#4CAF50"
             )
             
-            # Summary stats
             total_realized = realized_chart_data['Realized PnL (USD)'].sum()
-            st.caption(f"Total Realized: ${total_realized:,.2f}")
-        
-        with col2:
-            # Unrealized PnL Bar Chart
+            st.caption(f"Total Realized PnL: ${total_realized:,.2f}")
+            
+            # Add some spacing
+            st.write("")
+            st.write("")
+            
+            # Unrealized PnL Bar Chart - Bottom
+            st.write("**📈 Unrealized PnL by Token**")
             unrealized_chart_data = breakdown_df[['Token', 'Unrealized PnL (USD)']].copy()
             unrealized_chart_data = unrealized_chart_data.sort_values('Unrealized PnL (USD)', ascending=True)
             
-            st.write("**📈 Unrealized PnL by Token**")
-            # Create custom colors for positive/negative
-            colors = [
-                "#4CAF50" if x >= 0 else "#F44336" 
-                for x in unrealized_chart_data['Unrealized PnL (USD)']
-            ]
-            
-            # Using altair for better color control
+            # Using matplotlib for better color control
             try:
-                import altair as alt
-                chart = alt.Chart(unrealized_chart_data).mark_bar().encode(
-                    x=alt.X('Unrealized PnL (USD):Q', title='Unrealized PnL (USD)'),
-                    y=alt.Y('Token:N', sort='-x', title='Token'),
-                    color=alt.Color('Unrealized PnL (USD):Q', 
-                                  scale=alt.Scale(domain=[-1, 0, 1], range=['#F44336', '#FF9800', '#4CAF50']),
-                                  legend=None),
-                    tooltip=['Token', 'Unrealized PnL (USD)']
-                ).properties(height=300)
-                st.altair_chart(chart, use_container_width=True)
+                import matplotlib.pyplot as plt
+                fig, ax = plt.subplots(figsize=(10, 6))
+                tokens = unrealized_chart_data['Token']
+                values = unrealized_chart_data['Unrealized PnL (USD)']
+                
+                colors = ['#4CAF50' if x >= 0 else '#F44336' for x in values]
+                
+                bars = ax.barh(tokens, values, color=colors)
+                ax.set_xlabel('Unrealized PnL (USD)')
+                ax.set_title('Unrealized PnL by Token')
+                
+                # Add value labels on bars
+                for bar in bars:
+                    width = bar.get_width()
+                    label_x_pos = width + (0.01 * max(values)) if width >= 0 else width - (0.01 * abs(min(values)))
+                    ax.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
+                           f'${width:,.0f}', ha='left' if width >= 0 else 'right', va='center')
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                
             except ImportError:
                 # Fallback to streamlit bar chart
+                colors = [
+                    "#4CAF50" if x >= 0 else "#F44336" 
+                    for x in unrealized_chart_data['Unrealized PnL (USD)']
+                ]
                 st.bar_chart(
                     unrealized_chart_data.set_index('Token'),
                     color=colors
                 )
             
-            # Summary stats
             total_unrealized = unrealized_chart_data['Unrealized PnL (USD)'].sum()
-            st.caption(f"Total Unrealized: ${total_unrealized:,.2f}")
-    
-    else:
-        # Stacked layout (not enough space)
-        # Realized PnL Bar Chart - Top
-        st.write("**💰 Realized PnL by Token**")
-        realized_chart_data = breakdown_df[['Token', 'Realized PnL (USD)']].copy()
-        realized_chart_data = realized_chart_data.sort_values('Realized PnL (USD)', ascending=True)
-        
-        st.bar_chart(
-            realized_chart_data.set_index('Token'),
-            color="#4CAF50"
-        )
-        
-        total_realized = realized_chart_data['Realized PnL (USD)'].sum()
-        st.caption(f"Total Realized PnL: ${total_realized:,.2f}")
-        
-        # Add some spacing
-        st.write("")
-        st.write("")
-        
-        # Unrealized PnL Bar Chart - Bottom
-        st.write("**📈 Unrealized PnL by Token**")
-        unrealized_chart_data = breakdown_df[['Token', 'Unrealized PnL (USD)']].copy()
-        unrealized_chart_data = unrealized_chart_data.sort_values('Unrealized PnL (USD)', ascending=True)
-        
-        # Using matplotlib for better color control in stacked layout
-        try:
-                        
-            fig, ax = plt.subplots(figsize=(10, 6))
-            tokens = unrealized_chart_data['Token']
-            values = unrealized_chart_data['Unrealized PnL (USD)']
-            
-            colors = ['#4CAF50' if x >= 0 else '#F44336' for x in values]
-            
-            bars = ax.barh(tokens, values, color=colors)
-            ax.set_xlabel('Unrealized PnL (USD)')
-            ax.set_title('Unrealized PnL by Token')
-            
-            # Add value labels on bars
-            for bar in bars:
-                width = bar.get_width()
-                label_x_pos = width + (0.01 * max(values)) if width >= 0 else width - (0.01 * abs(min(values)))
-                ax.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
-                       f'${width:,.0f}', ha='left' if width >= 0 else 'right', va='center')
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            
-        except ImportError:
-            # Fallback to streamlit bar chart
-            colors = [
-                "#4CAF50" if x >= 0 else "#F44336" 
-                for x in unrealized_chart_data['Unrealized PnL (USD)']
-            ]
-            st.bar_chart(
-                unrealized_chart_data.set_index('Token'),
-                color=colors
-            )
-        
-        total_unrealized = unrealized_chart_data['Unrealized PnL (USD)'].sum()
-        st.caption(f"Total Unrealized PnL: ${total_unrealized:,.2f}")
+            st.caption(f"Total Unrealized PnL: ${total_unrealized:,.2f}")
 
-    # Add expandable detailed table
-    with st.expander("📋 View Detailed PnL Table"):
-        st.dataframe(breakdown_df[['Token', 'Realized PnL (USD)', 'Unrealized PnL (USD)', 
-                                 'Current Holdings', 'Avg Cost', 'Current Price']], 
-                   use_container_width=True)
-
-    # Pie Charts for Top Tokens by PnL
-
-    if not breakdown_df.empty:
+        # Pie Charts for Top Tokens by PnL
         st.subheader("📊 Top Tokens by PnL")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Top 5 tokens by Realized PnL
+            realized_top5 = breakdown_df.nlargest(5, 'Realized PnL (USD)')
+            if not realized_top5.empty:
+                # Calculate percentages for tooltips
+                total_realized = realized_top5['Realized PnL (USD)'].sum()
+                realized_top5['Percentage'] = (realized_top5['Realized PnL (USD)'] / total_realized * 100).round(1)
+                
+                fig_realized = px.pie(
+                    realized_top5,
+                    values='Realized PnL (USD)',
+                    names='Token',
+                    title='💰 Top 5 Tokens by Realized PnL',
+                    hover_data=['Percentage'],
+                    color_discrete_sequence=px.colors.sequential.Greens
+                )
+                fig_realized.update_traces(
+                    textposition='inside', 
+                    textinfo='percent+label',
+                    hovertemplate='<b>%{label}</b><br>PnL: $%{value:,.2f}<br>Share: %{customdata[0]}%<extra></extra>'
+                )
+                fig_realized.update_layout(
+                    showlegend=False,
+                    title_x=0.5,
+                    title_font_size=16
+                )
+                st.plotly_chart(fig_realized, use_container_width=True)
+                
+                # Show summary stats
+                st.caption(f"Total Realized PnL: ${realized_top5['Realized PnL (USD)'].sum():,.2f}")
+            else:
+                st.info("No realized PnL data available")
+        
+        with col2:
+            # Top 5 tokens by Unrealized PnL (absolute value)
+            unrealized_top5 = breakdown_df.reindex(
+                breakdown_df['Unrealized PnL (USD)'].abs().nlargest(5).index
+            )
+            if not unrealized_top5.empty:
+                # Calculate percentages for tooltips
+                total_unrealized_abs = unrealized_top5['Unrealized PnL (USD)'].abs().sum()
+                unrealized_top5['Percentage'] = (unrealized_top5['Unrealized PnL (USD)'].abs() / total_unrealized_abs * 100).round(1)
+                
+                # Use different colors for positive and negative PnL
+                colors = ['green' if x >= 0 else 'red' for x in unrealized_top5['Unrealized PnL (USD)']]
+                
+                fig_unrealized = px.pie(
+                    unrealized_top5,
+                    values='Unrealized PnL (USD)',
+                    names='Token',
+                    title='📈 Top 5 Tokens by Unrealized PnL',
+                    hover_data=['Percentage'],
+                    color=colors
+                )
+                fig_unrealized.update_traces(
+                    textposition='inside', 
+                    textinfo='percent+label',
+                    hovertemplate='<b>%{label}</b><br>PnL: $%{value:,.2f}<br>Share: %{customdata[0]}%<extra></extra>'
+                )
+                fig_unrealized.update_layout(
+                    showlegend=False,
+                    title_x=0.5,
+                    title_font_size=16
+                )
+                st.plotly_chart(fig_unrealized, use_container_width=True)
+                
+                # Show summary stats
+                total_unrealized = unrealized_top5['Unrealized PnL (USD)'].sum()
+                st.caption(f"Total Unrealized PnL: ${total_unrealized:,.2f}")
+            else:
+                st.info("No unrealized PnL data available")
+
+# -------------------------------
+# Transactions Page
+# -------------------------------
+def transactions_page(df):
+    st.header("📊 Transaction Details")
+    
+    # Display transactions table
+    st.dataframe(df, use_container_width=True, height=600)
+    
+    # Transaction statistics
+    st.subheader("📈 Transaction Statistics")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # Total transactions
+    total_txs = len(df)
+    col1.metric("Total Transactions", f"{total_txs:,}")
+    
+    # Transactions by type
+    tx_types = df['transaction_type'].value_counts()
+    col2.metric("Transaction Types", f"{len(tx_types)}")
+    
+    # Date range
+    if not df.empty:
+        min_date = df['block_time'].min().strftime('%Y-%m-%d')
+        max_date = df['block_time'].max().strftime('%Y-%m-%d')
+        col3.metric("Date Range", f"{min_date} to {max_date}")
+    
+    # Unique tokens
+    unique_tokens = df['token_symbol'].nunique()
+    col4.metric("Unique Tokens", f"{unique_tokens}")
+    
+    # Transactions over time chart
+    st.subheader("📅 Transactions Over Time")
+    
+    if not df.empty:
+        # Group by date
+        df_date = df.copy()
+        df_date['date'] = df_date['block_time'].dt.date
+        daily_counts = df_date.groupby('date').size().reset_index(name='count')
+        
+        # Create chart
+        fig = px.line(
+            daily_counts, 
+            x='date', 
+            y='count', 
+            title='Daily Transaction Count',
+            labels={'date': 'Date', 'count': 'Number of Transactions'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # Token distribution
+    st.subheader("🪙 Token Distribution")
+    
+    if not df.empty:
+        token_counts = df['token_symbol'].value_counts().reset_index()
+        token_counts.columns = ['Token', 'Count']
+        
+        fig = px.pie(
+            token_counts.head(10),  # Top 10 tokens
+            values='Count', 
+            names='Token', 
+            title='Top 10 Tokens by Transaction Count'
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------------
+# Settings & Diagnostics Page
+# -------------------------------
+def settings_diagnostics_page(df, realized_total, unrealized_total, total_gas_costs, breakdown_df, sidebar_params):
+    st.header("⚙️ Settings & Diagnostics")
+    
+    # Cache management
+    st.subheader("📂 Cache Management")
+    
+    if st.button("🔄 Clear All Cache"):
+        # Implementation for clearing cache
+        st.warning("Cache clearing functionality would be implemented here")
+    
+    if st.button("📊 Export Data to CSV"):
+        # Implementation for exporting data
+        st.info("Data export functionality would be implemented here")
+    
+    # Diagnostic information
+    st.subheader("🔍 Diagnostic Information")
+    
+    # PnL Validation
+    if not df.empty:
+        # Group by token_symbol for sample data, token_address for real data
+        group_key = 'token_symbol' if sidebar_params["wallet_address"].strip() == "" else 'token_address'
+        
+        validation_df = validate_pnl_calculation(
+            df, 
+            realized_total, 
+            unrealized_total, 
+            total_gas_costs,
+            breakdown_df
+        )
+        failed_validations = validation_df[validation_df['Pass'] == False]
+
+        if not failed_validations.empty:
+            st.warning("⚠️ PnL Validation Issues Detected")
+            with st.expander("View Validation Details", expanded=True):
+                st.dataframe(validation_df, use_container_width=True)
+                st.write("**Issues found:**")
+                for _, row in failed_validations.iterrows():
+                    st.write(f"- {row['Check']}: Failed")
+        else:
+            st.success("✅ PnL Calculations Validated Successfully")
+            with st.expander("View Validation Details"):
+                st.dataframe(validation_df, use_container_width=True)
+    
+    # System information
+    st.subheader("🖥️ System Information")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # Top 5 tokens by Realized PnL
-        realized_top5 = breakdown_df.nlargest(5, 'Realized PnL (USD)')
-        if not realized_top5.empty:
-            # Calculate percentages for tooltips
-            total_realized = realized_top5['Realized PnL (USD)'].sum()
-            realized_top5['Percentage'] = (realized_top5['Realized PnL (USD)'] / total_realized * 100).round(1)
-            
-            fig_realized = px.pie(
-                realized_top5,
-                values='Realized PnL (USD)',
-                names='Token',
-                title='💰 Top 5 Tokens by Realized PnL',
-                hover_data=['Percentage'],
-                color_discrete_sequence=px.colors.sequential.Greens
-            )
-            fig_realized.update_traces(
-                textposition='inside', 
-                textinfo='percent+label',
-                hovertemplate='<b>%{label}</b><br>PnL: $%{value:,.2f}<br>Share: %{customdata[0]}%<extra></extra>'
-            )
-            fig_realized.update_layout(
-                showlegend=False,
-                title_x=0.5,
-                title_font_size=16
-            )
-            st.plotly_chart(fig_realized, use_container_width=True)
-            
-            # Show summary stats
-            st.caption(f"Total Realized PnL: ${realized_top5['Realized PnL (USD)'].sum():,.2f}")
-        else:
-            st.info("No realized PnL data available")
+        st.write("**Python Version**")
+        st.code("3.x")
+        
+        st.write("**Streamlit Version**")
+        st.code(st.__version__)
     
     with col2:
-        # Top 5 tokens by Unrealized PnL (absolute value)
-        unrealized_top5 = breakdown_df.reindex(
-            breakdown_df['Unrealized PnL (USD)'].abs().nlargest(5).index
-        )
-        if not unrealized_top5.empty:
-            # Calculate percentages for tooltips
-            total_unrealized_abs = unrealized_top5['Unrealized PnL (USD)'].abs().sum()
-            unrealized_top5['Percentage'] = (unrealized_top5['Unrealized PnL (USD)'].abs() / total_unrealized_abs * 100).round(1)
-            
-            # Use different colors for positive and negative PnL
-            colors = ['green' if x >= 0 else 'red' for x in unrealized_top5['Unrealized PnL (USD)']]
-            
-            fig_unrealized = px.pie(
-                unrealized_top5,
-                values='Unrealized PnL (USD)',
-                names='Token',
-                title='📈 Top 5 Tokens by Unrealized PnL',
-                hover_data=['Percentage'],
-                color=colors
-            )
-            fig_unrealized.update_traces(
-                textposition='inside', 
-                textinfo='percent+label',
-                hovertemplate='<b>%{label}</b><br>PnL: $%{value:,.2f}<br>Share: %{customdata[0]}%<extra></extra>'
-            )
-            fig_unrealized.update_layout(
-                showlegend=False,
-                title_x=0.5,
-                title_font_size=16
-            )
-            st.plotly_chart(fig_unrealized, use_container_width=True)
-            
-            # Show summary stats
-            total_unrealized = unrealized_top5['Unrealized PnL (USD)'].sum()
-            st.caption(f"Total Unrealized PnL: ${total_unrealized:,.2f}")
-        else:
-            st.info("No unrealized PnL data available")
-
-    # -------------------------------
-    # Transactions table
-    # -------------------------------
-    st.subheader("📊 Enriched Transactions")
-    st.dataframe(df, use_container_width=True, height=420)
-
-    # Price validation and cleanup
-    from price_fetcher import get_token_price
-
-    # Replace invalid prices with historical fetch
-    df["price_usd"] = df.apply(
-        lambda row: row["price_usd"]
-        if row["price_usd"] > 0
-        else (
-            get_token_price(
-                row["token_symbol"],
-                row.get("token_address"),
-                row["blockchain"],
-                block_time=row["block_time"]
-            ) or 0
-        ),
-        axis=1
-    )
-
-    # Drop unsupported tokens (no price found)
-    df = df[df["price_usd"] > 0]
-
-    if diagnostic_mode:
-        st.subheader("🔍 Diagnostic Report")
-        # UPDATED: Pass gas costs to validation
-        validation_df = validate_pnl_calculation(df, realized_total, unrealized_total, total_gas_costs, breakdown_df)
-        st.dataframe(validation_df, use_container_width=True)
-
-        st.subheader("📊 PnL Breakdown")
-        st.dataframe(breakdown_df, use_container_width=True)
+        st.write("**Pandas Version**")
+        st.code(pd.__version__)
         
-    if not using_default:
-        with st.expander("📂 View local cache files"):
-            files = glob.glob(os.path.join(CACHE_DIR, chosen_wallet.lower(), "*.parquet"))
-            st.write([os.path.basename(f) for f in files]) if files else st.write("No cache files yet.")
+        st.write("**Cache Directory**")
+        st.code(CACHE_DIR)
+    
+    # Data quality check
+    st.subheader("📊 Data Quality Check")
+    
+    if not df.empty:
+        # Check for missing values
+        missing_values = df.isnull().sum()
+        missing_percentage = (missing_values / len(df)) * 100
+        
+        quality_df = pd.DataFrame({
+            'Column': missing_values.index,
+            'Missing Values': missing_values.values,
+            'Percentage': missing_percentage.values
+        })
+        
+        st.dataframe(quality_df[quality_df['Missing Values'] > 0], use_container_width=True)
+        
+        if quality_df[quality_df['Missing Values'] > 0].empty:
+            st.success("✅ No missing values found in the dataset")
+        else:
+            st.warning("⚠️ Missing values detected in some columns")
 
-        progress.progress(100, text="Done!")
-        time.sleep(0.1)
-        progress.empty()
-      
+# -------------------------------
+# Main function
+# -------------------------------
+def main():
+    # Setup navigation
+    page = setup_navigation()
+    
+    # Setup sidebar (shared across all pages)
+    sidebar_params = setup_sidebar()
+    
+    # Load data (shared across all pages)
+    data = load_data(sidebar_params)
+    
+    if data[0] is None:
+        # No data available
+        return
+    
+    df, realized_total, unrealized_total, total_gas_costs, overall_pnl, roi_percentage, breakdown_df, total_invested = data
+    
+    # Display appropriate page based on navigation
+    if page == "Dashboard":
+        dashboard_page(df, realized_total, unrealized_total, total_gas_costs, overall_pnl, roi_percentage, breakdown_df, total_invested)
+    elif page == "PnL Analysis":
+        pnl_analysis_page(realized_total, unrealized_total, total_gas_costs, overall_pnl, roi_percentage, breakdown_df, total_invested)
+    elif page == "Transactions":
+        transactions_page(df)
+    elif page == "Settings & Diagnostics":
+        settings_diagnostics_page(df, realized_total, unrealized_total, total_gas_costs, breakdown_df, sidebar_params)
+
 if __name__ == "__main__":
     main()
