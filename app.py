@@ -257,51 +257,7 @@ def main():
     col3.metric("Gas Costs (USD)", f"${gas_cost:,.2f}")
     col4.metric("Net Cash Flow (USD)", f"${pnl:,.2f}")
 
-    # Multiple gauge view for different aspects
-st.subheader("📊 Portfolio Health Dashboard")
-
-# Create columns for multiple gauges
-gauge_col1, gauge_col2, gauge_col3 = st.columns(3)
-
-with gauge_col1:
-    # Overall PnL Gauge
-    st.write("**Overall PnL**")
-    overall_pnl = realized_total + unrealized_total - total_gas_costs
-    gauge_value = min(100, max(0, 50 + (overall_pnl / max(abs(overall_pnl), 1)) * 50))
-    st.progress(gauge_value/100, text=f"${overall_pnl:,.2f}")
-    st.caption("⚖️ Break Even" if abs(overall_pnl) < 10 else "✅ Profit" if overall_pnl > 0 else "❌ Loss")
-
-with gauge_col2:
-    # Realized PnL Gauge
-    st.write("**Realized PnL**")
-    realized_gauge = min(100, max(0, 50 + (realized_total / max(abs(realized_total), 1)) * 50))
-    st.progress(realized_gauge/100, text=f"${realized_total:,.2f}")
-    st.caption("💰 Realized Gains/Losses")
-
-with gauge_col3:
-    # Unrealized PnL Gauge
-    st.write("**Unrealized PnL**")
-    unrealized_gauge = min(100, max(0, 50 + (unrealized_total / max(abs(unrealized_total), 1)) * 50))
-    st.progress(unrealized_gauge/100, text=f"${unrealized_total:,.2f}")
-    st.caption("📈 Paper Gains/Losses")
-
-# Performance summary
-st.write("---")
-performance_col1, performance_col2 = st.columns(2)
-
-with performance_col1:
-    st.write("**📋 Performance Summary**")
-    st.metric("Total Investment", f"${total_in:,.2f}")
-    st.metric("Current Portfolio Value", f"${total_in + unrealized_total:,.2f}")
-    st.metric("Net PnL", f"${overall_pnl:,.2f}")
-
-with performance_col2:
-    st.write("**📊 Breakdown**")
-    st.metric("Realized PnL", f"${realized_total:,.2f}")
-    st.metric("Unrealized PnL", f"${unrealized_total:,.2f}")
-    st.metric("Gas Costs", f"${total_gas_costs:,.2f}")
-
-    # -------------------------------
+        # -------------------------------
     # PnL calculation with current prices
     # -------------------------------
     realized_total = 0.0
@@ -358,6 +314,240 @@ with performance_col2:
     if tokens_with_missing_prices:
         st.warning(f"Tokens excluded from PnL due to missing prices: {tokens_with_missing_prices}")
 
+        # ... your existing PnL calculation code ...
+
+    # Combine breakdowns into one DataFrame
+    if breakdown_list:
+        breakdown_df = pd.concat(breakdown_list, ignore_index=True)
+    else:
+        breakdown_df = pd.DataFrame()
+
+    if tokens_with_missing_prices:
+        st.warning(f"Tokens excluded from PnL due to missing prices: {tokens_with_missing_prices}")
+
+    # -------------------------------
+    # PnL Validation - UPDATED to include gas costs
+    # -------------------------------
+    validation_df = validate_pnl_calculation(
+        df[df[group_key].isin(tokens_with_valid_prices)], 
+        realized_total, 
+        unrealized_total, 
+        total_gas_costs,
+        breakdown_df
+    )
+    failed_validations = validation_df[validation_df['Pass'] == False]
+
+    if not failed_validations.empty:
+        st.warning("⚠️ PnL Validation Issues Detected")
+        with st.expander("View Validation Details", expanded=True):
+            st.dataframe(validation_df, use_container_width=True)
+            st.write("**Issues found:**")
+            for _, row in failed_validations.iterrows():
+                st.write(f"- {row['Check']}: Failed")
+    else:
+        st.success("✅ PnL Calculations Validated Successfully")
+        with st.expander("View Validation Details"):
+            st.dataframe(validation_df, use_container_width=True)
+  
+    # -------------------------------
+    # Gauge and Speedometer Charts
+    # -------------------------------
+    st.subheader("📊 Portfolio Performance Dashboard")
+
+    # Calculate overall PnL
+    overall_pnl = realized_total + unrealized_total - total_gas_costs
+    total_invested = total_in if total_in > 0 else 1  # Avoid division by zero
+
+    # Calculate ROI percentage
+    roi_percentage = (overall_pnl / total_invested) * 100 if total_invested > 0 else 0
+
+    # Create two columns for side-by-side charts
+    gauge_col, speedometer_col = st.columns(2)
+
+    with gauge_col:
+        # -------------------------------
+        # Gauge Chart
+        # -------------------------------
+        st.write("**💰 PnL Gauge**")
+        
+        # Determine gauge color
+        if roi_percentage >= 20:
+            gauge_color = "green"
+        elif roi_percentage >= 10:
+            gauge_color = "lightgreen"
+        elif roi_percentage >= 0:
+            gauge_color = "yellow"
+        elif roi_percentage >= -10:
+            gauge_color = "orange"
+        else:
+            gauge_color = "red"
+        
+        # Create simple gauge using progress bar
+        max_abs_value = max(abs(overall_pnl) * 1.5, total_invested * 0.5, 1000)
+        gauge_position = 50 + (overall_pnl / max_abs_value) * 50
+        gauge_position = max(0, min(100, gauge_position))
+        
+        st.progress(gauge_position/100, text=f"${overall_pnl:,.2f}")
+        
+        # Gauge labels
+        col_left, col_center, col_right = st.columns([1, 2, 1])
+        with col_left:
+            st.caption(f"-${max_abs_value:,.0f}")
+        with col_center:
+            st.caption("← Loss | Profit →")
+        with col_right:
+            st.caption(f"+${max_abs_value:,.0f}")
+        
+        # Performance indicator
+        if overall_pnl > 0:
+            st.success(f"✅ Profit: ${overall_pnl:,.2f}")
+        elif overall_pnl < 0:
+            st.error(f"❌ Loss: ${abs(overall_pnl):,.2f}")
+        else:
+            st.info("⚖️ Break Even")
+
+    with speedometer_col:
+        # -------------------------------
+        # Speedometer Chart
+        # -------------------------------
+        st.write("**🚀 ROI Speedometer**")
+        
+        # Determine speedometer color and ranges
+        if roi_percentage >= 30:
+            speed_color = "#00FF00"  # Green - excellent
+            speed_label = "Exceptional"
+        elif roi_percentage >= 15:
+            speed_color = "#7CFC00"  # Light green - great
+            speed_label = "Great"
+        elif roi_percentage >= 5:
+            speed_color = "#ADFF2F"  # Green yellow - good
+            speed_label = "Good"
+        elif roi_percentage >= 0:
+            speed_color = "#FFFF00"  # Yellow - okay
+            speed_label = "Okay"
+        elif roi_percentage >= -10:
+            speed_color = "#FFA500"  # Orange - caution
+            speed_label = "Caution"
+        else:
+            speed_color = "#FF0000"  # Red - danger
+            speed_label = "Danger"
+        
+        # Create speedometer using progress bar
+        # Scale: -50% to +50% ROI for the speedometer
+        speedometer_min = -50
+        speedometer_max = 50
+        speedometer_value = max(speedometer_min, min(speedometer_max, roi_percentage))
+        speedometer_normalized = (speedometer_value - speedometer_min) / (speedometer_max - speedometer_min)
+        
+        st.progress(speedometer_normalized, text=f"{roi_percentage:+.1f}% ROI")
+        
+        # Speedometer labels
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.caption(f"{speedometer_min}%")
+        with col2:
+            st.caption(speed_label)
+        with col3:
+            st.caption(f"{speedometer_max}+%")
+        
+        # ROI performance text
+        if roi_percentage >= 20:
+            st.success("🎯 Exceptional Returns!")
+        elif roi_percentage >= 10:
+            st.success("🚀 Beating the Market!")
+        elif roi_percentage >= 5:
+            st.info("📈 Solid Performance")
+        elif roi_percentage >= 0:
+            st.info("📊 Market Average")
+        elif roi_percentage >= -10:
+            st.warning("⚠️ Below Expectations")
+        else:
+            st.error("🔻 Needs Improvement")
+
+    # -------------------------------
+    # Performance Metrics Below Charts
+    # -------------------------------
+    st.write("---")
+    st.write("**📈 Performance Metrics**")
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+    with metric_col1:
+        st.metric("Total Invested", f"${total_invested:,.2f}")
+    with metric_col2:
+        st.metric("Current Value", f"${total_invested + unrealized_total:,.2f}")
+    with metric_col3:
+        st.metric("Net PnL", f"${overall_pnl:,.2f}")
+    with metric_col4:
+        st.metric("ROI", f"{roi_percentage:+.1f}%")
+
+    # -------------------------------
+    # Detailed Breakdown
+    # -------------------------------
+    with st.expander("📋 Detailed Breakdown"):
+        detail_col1, detail_col2, detail_col3 = st.columns(3)
+        with detail_col1:
+            st.write("**Realized PnL**")
+            st.metric("Amount", f"${realized_total:,.2f}")
+            st.metric("% of Investment", f"{(realized_total/total_invested)*100:+.1f}%" if total_invested > 0 else "N/A")
+        
+        with detail_col2:
+            st.write("**Unrealized PnL**")
+            st.metric("Amount", f"${unrealized_total:,.2f}")
+            st.metric("% of Investment", f"{(unrealized_total/total_invested)*100:+.1f}%" if total_invested > 0 else "N/A")
+        
+        with detail_col3:
+            st.write("**Costs & Efficiency**")
+            st.metric("Gas Costs", f"${total_gas_costs:,.2f}")
+            st.metric("Cost Ratio", f"{(total_gas_costs/total_invested)*100:.1f}%" if total_invested > 0 else "N/A")
+
+    # -------------------------------
+    # Performance Assessment
+    # -------------------------------
+    st.write("---")
+    st.write("**📊 Performance Assessment**")
+
+    if roi_percentage >= 20:
+        st.success("""
+        **🎯 Outstanding Performance!**
+        - You're significantly outperforming the market
+        - Consider taking some profits
+        - Review your successful strategies
+        """)
+    elif roi_percentage >= 10:
+        st.success("""
+        **🚀 Excellent Performance!**
+        - Beating market averages
+        - Solid investment decisions
+        - Maintain your strategy
+        """)
+    elif roi_percentage >= 5:
+        st.info("""
+        **📈 Good Performance!**
+        - Steady growth above inflation
+        - Consistent strategy working
+        - Consider diversification
+        """)
+    elif roi_percentage >= 0:
+        st.info("""
+        **⚖️ Break-Even Performance**
+        - Keeping pace with market
+        - Review asset allocation
+        - Consider cost optimization
+        """)
+    elif roi_percentage >= -10:
+        st.warning("""
+        **⚠️ Needs Improvement**
+        - Below market performance
+        - Review investment thesis
+        - Consider rebalancing
+        """)
+    else:
+        st.error("""
+        **🔻 Concerning Performance**
+        - Significant underperformance
+        - Urgent portfolio review needed
+        - Consider professional advice
+        """)
     # -------------------------------
     # PnL Validation - UPDATED to include gas costs
     # -------------------------------
@@ -490,9 +680,7 @@ with performance_col2:
         
         # Using matplotlib for better color control in stacked layout
         try:
-            import matplotlib.pyplot as plt
-            import numpy as np
-            
+                        
             fig, ax = plt.subplots(figsize=(10, 6))
             tokens = unrealized_chart_data['Token']
             values = unrealized_chart_data['Unrealized PnL (USD)']
