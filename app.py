@@ -14,6 +14,8 @@ import pytz
 import random
 import logging
 import traceback
+import plotly.express as px
+import matplotlib.pyplot as plt
 
 
 # Sample Data
@@ -23,8 +25,8 @@ def generate_sample_data(n_days=7, txs_per_day=7, wallet_address="0xDEADBEEF1234
     start_date = datetime.today() - timedelta(days=n_days)
 
     tokens = [
-        ("USDC", 1.0),
-        ("USDT", 1.0), 
+        ("ADA", 0.75),
+        ("XRP", 2.5), 
         ("ETH", 2000.0),
         ("ARB", 3.0),
         ("OP", 3.5),
@@ -85,8 +87,8 @@ def get_sample_current_prices():
     """Generate mock current prices that differ from historical prices"""
     return {
         # These would be token addresses in real data, using symbols for demo
-        "USDC": 1.00,
-        "USDT": 0.999,
+        "ADA": 0.90,
+        "XRP": 2.8,
         "ETH": 2150.0,  # Higher than historical average
         "ARB": 2.85,    # Lower than historical average  
         "OP": 3.75,     # Higher than historical average
@@ -255,6 +257,50 @@ def main():
     col3.metric("Gas Costs (USD)", f"${gas_cost:,.2f}")
     col4.metric("Net Cash Flow (USD)", f"${pnl:,.2f}")
 
+    # Multiple gauge view for different aspects
+st.subheader("📊 Portfolio Health Dashboard")
+
+# Create columns for multiple gauges
+gauge_col1, gauge_col2, gauge_col3 = st.columns(3)
+
+with gauge_col1:
+    # Overall PnL Gauge
+    st.write("**Overall PnL**")
+    overall_pnl = realized_total + unrealized_total - total_gas_costs
+    gauge_value = min(100, max(0, 50 + (overall_pnl / max(abs(overall_pnl), 1)) * 50))
+    st.progress(gauge_value/100, text=f"${overall_pnl:,.2f}")
+    st.caption("⚖️ Break Even" if abs(overall_pnl) < 10 else "✅ Profit" if overall_pnl > 0 else "❌ Loss")
+
+with gauge_col2:
+    # Realized PnL Gauge
+    st.write("**Realized PnL**")
+    realized_gauge = min(100, max(0, 50 + (realized_total / max(abs(realized_total), 1)) * 50))
+    st.progress(realized_gauge/100, text=f"${realized_total:,.2f}")
+    st.caption("💰 Realized Gains/Losses")
+
+with gauge_col3:
+    # Unrealized PnL Gauge
+    st.write("**Unrealized PnL**")
+    unrealized_gauge = min(100, max(0, 50 + (unrealized_total / max(abs(unrealized_total), 1)) * 50))
+    st.progress(unrealized_gauge/100, text=f"${unrealized_total:,.2f}")
+    st.caption("📈 Paper Gains/Losses")
+
+# Performance summary
+st.write("---")
+performance_col1, performance_col2 = st.columns(2)
+
+with performance_col1:
+    st.write("**📋 Performance Summary**")
+    st.metric("Total Investment", f"${total_in:,.2f}")
+    st.metric("Current Portfolio Value", f"${total_in + unrealized_total:,.2f}")
+    st.metric("Net PnL", f"${overall_pnl:,.2f}")
+
+with performance_col2:
+    st.write("**📊 Breakdown**")
+    st.metric("Realized PnL", f"${realized_total:,.2f}")
+    st.metric("Unrealized PnL", f"${unrealized_total:,.2f}")
+    st.metric("Gas Costs", f"${total_gas_costs:,.2f}")
+
     # -------------------------------
     # PnL calculation with current prices
     # -------------------------------
@@ -352,7 +398,220 @@ def main():
         st.dataframe(breakdown_df, use_container_width=True, height=320)
     else:
         st.info("No PnL data available.")
-     
+
+    # -------------------------------
+    # Responsive Bar Charts for PnL Breakdown
+    # -------------------------------
+    if not breakdown_df.empty:
+        st.subheader("📊 PnL Breakdown by Token")
+    
+    # Check if we have enough space for side-by-side layout
+    # For web typically > 768px width is considered enough for side-by-side
+    # Streamlit doesn't have direct screen width detection, so we'll use a simple heuristic
+    enough_space = len(breakdown_df) <= 8  # Fewer tokens = more space for side-by-side
+    
+    if enough_space:
+        # Side-by-side layout
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Realized PnL Bar Chart
+            realized_chart_data = breakdown_df[['Token', 'Realized PnL (USD)']].copy()
+            realized_chart_data = realized_chart_data.sort_values('Realized PnL (USD)', ascending=True)
+            
+            st.write("**💰 Realized PnL by Token**")
+            st.bar_chart(
+                realized_chart_data.set_index('Token'),
+                color="#4CAF50"  # Green for realized gains
+            )
+            
+            # Summary stats
+            total_realized = realized_chart_data['Realized PnL (USD)'].sum()
+            st.caption(f"Total Realized: ${total_realized:,.2f}")
+        
+        with col2:
+            # Unrealized PnL Bar Chart
+            unrealized_chart_data = breakdown_df[['Token', 'Unrealized PnL (USD)']].copy()
+            unrealized_chart_data = unrealized_chart_data.sort_values('Unrealized PnL (USD)', ascending=True)
+            
+            st.write("**📈 Unrealized PnL by Token**")
+            # Create custom colors for positive/negative
+            colors = [
+                "#4CAF50" if x >= 0 else "#F44336" 
+                for x in unrealized_chart_data['Unrealized PnL (USD)']
+            ]
+            
+            # Using altair for better color control
+            try:
+                import altair as alt
+                chart = alt.Chart(unrealized_chart_data).mark_bar().encode(
+                    x=alt.X('Unrealized PnL (USD):Q', title='Unrealized PnL (USD)'),
+                    y=alt.Y('Token:N', sort='-x', title='Token'),
+                    color=alt.Color('Unrealized PnL (USD):Q', 
+                                  scale=alt.Scale(domain=[-1, 0, 1], range=['#F44336', '#FF9800', '#4CAF50']),
+                                  legend=None),
+                    tooltip=['Token', 'Unrealized PnL (USD)']
+                ).properties(height=300)
+                st.altair_chart(chart, use_container_width=True)
+            except ImportError:
+                # Fallback to streamlit bar chart
+                st.bar_chart(
+                    unrealized_chart_data.set_index('Token'),
+                    color=colors
+                )
+            
+            # Summary stats
+            total_unrealized = unrealized_chart_data['Unrealized PnL (USD)'].sum()
+            st.caption(f"Total Unrealized: ${total_unrealized:,.2f}")
+    
+    else:
+        # Stacked layout (not enough space)
+        # Realized PnL Bar Chart - Top
+        st.write("**💰 Realized PnL by Token**")
+        realized_chart_data = breakdown_df[['Token', 'Realized PnL (USD)']].copy()
+        realized_chart_data = realized_chart_data.sort_values('Realized PnL (USD)', ascending=True)
+        
+        st.bar_chart(
+            realized_chart_data.set_index('Token'),
+            color="#4CAF50"
+        )
+        
+        total_realized = realized_chart_data['Realized PnL (USD)'].sum()
+        st.caption(f"Total Realized PnL: ${total_realized:,.2f}")
+        
+        # Add some spacing
+        st.write("")
+        st.write("")
+        
+        # Unrealized PnL Bar Chart - Bottom
+        st.write("**📈 Unrealized PnL by Token**")
+        unrealized_chart_data = breakdown_df[['Token', 'Unrealized PnL (USD)']].copy()
+        unrealized_chart_data = unrealized_chart_data.sort_values('Unrealized PnL (USD)', ascending=True)
+        
+        # Using matplotlib for better color control in stacked layout
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+            
+            fig, ax = plt.subplots(figsize=(10, 6))
+            tokens = unrealized_chart_data['Token']
+            values = unrealized_chart_data['Unrealized PnL (USD)']
+            
+            colors = ['#4CAF50' if x >= 0 else '#F44336' for x in values]
+            
+            bars = ax.barh(tokens, values, color=colors)
+            ax.set_xlabel('Unrealized PnL (USD)')
+            ax.set_title('Unrealized PnL by Token')
+            
+            # Add value labels on bars
+            for bar in bars:
+                width = bar.get_width()
+                label_x_pos = width + (0.01 * max(values)) if width >= 0 else width - (0.01 * abs(min(values)))
+                ax.text(label_x_pos, bar.get_y() + bar.get_height()/2, 
+                       f'${width:,.0f}', ha='left' if width >= 0 else 'right', va='center')
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+        except ImportError:
+            # Fallback to streamlit bar chart
+            colors = [
+                "#4CAF50" if x >= 0 else "#F44336" 
+                for x in unrealized_chart_data['Unrealized PnL (USD)']
+            ]
+            st.bar_chart(
+                unrealized_chart_data.set_index('Token'),
+                color=colors
+            )
+        
+        total_unrealized = unrealized_chart_data['Unrealized PnL (USD)'].sum()
+        st.caption(f"Total Unrealized PnL: ${total_unrealized:,.2f}")
+
+    # Add expandable detailed table
+    with st.expander("📋 View Detailed PnL Table"):
+        st.dataframe(breakdown_df[['Token', 'Realized PnL (USD)', 'Unrealized PnL (USD)', 
+                                 'Current Holdings', 'Avg Cost', 'Current Price']], 
+                   use_container_width=True)
+
+    # Pie Charts for Top Tokens by PnL
+
+    if not breakdown_df.empty:
+        st.subheader("📊 Top Tokens by PnL")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Top 5 tokens by Realized PnL
+        realized_top5 = breakdown_df.nlargest(5, 'Realized PnL (USD)')
+        if not realized_top5.empty:
+            # Calculate percentages for tooltips
+            total_realized = realized_top5['Realized PnL (USD)'].sum()
+            realized_top5['Percentage'] = (realized_top5['Realized PnL (USD)'] / total_realized * 100).round(1)
+            
+            fig_realized = px.pie(
+                realized_top5,
+                values='Realized PnL (USD)',
+                names='Token',
+                title='💰 Top 5 Tokens by Realized PnL',
+                hover_data=['Percentage'],
+                color_discrete_sequence=px.colors.sequential.Greens
+            )
+            fig_realized.update_traces(
+                textposition='inside', 
+                textinfo='percent+label',
+                hovertemplate='<b>%{label}</b><br>PnL: $%{value:,.2f}<br>Share: %{customdata[0]}%<extra></extra>'
+            )
+            fig_realized.update_layout(
+                showlegend=False,
+                title_x=0.5,
+                title_font_size=16
+            )
+            st.plotly_chart(fig_realized, use_container_width=True)
+            
+            # Show summary stats
+            st.caption(f"Total Realized PnL: ${realized_top5['Realized PnL (USD)'].sum():,.2f}")
+        else:
+            st.info("No realized PnL data available")
+    
+    with col2:
+        # Top 5 tokens by Unrealized PnL (absolute value)
+        unrealized_top5 = breakdown_df.reindex(
+            breakdown_df['Unrealized PnL (USD)'].abs().nlargest(5).index
+        )
+        if not unrealized_top5.empty:
+            # Calculate percentages for tooltips
+            total_unrealized_abs = unrealized_top5['Unrealized PnL (USD)'].abs().sum()
+            unrealized_top5['Percentage'] = (unrealized_top5['Unrealized PnL (USD)'].abs() / total_unrealized_abs * 100).round(1)
+            
+            # Use different colors for positive and negative PnL
+            colors = ['green' if x >= 0 else 'red' for x in unrealized_top5['Unrealized PnL (USD)']]
+            
+            fig_unrealized = px.pie(
+                unrealized_top5,
+                values='Unrealized PnL (USD)',
+                names='Token',
+                title='📈 Top 5 Tokens by Unrealized PnL',
+                hover_data=['Percentage'],
+                color=colors
+            )
+            fig_unrealized.update_traces(
+                textposition='inside', 
+                textinfo='percent+label',
+                hovertemplate='<b>%{label}</b><br>PnL: $%{value:,.2f}<br>Share: %{customdata[0]}%<extra></extra>'
+            )
+            fig_unrealized.update_layout(
+                showlegend=False,
+                title_x=0.5,
+                title_font_size=16
+            )
+            st.plotly_chart(fig_unrealized, use_container_width=True)
+            
+            # Show summary stats
+            total_unrealized = unrealized_top5['Unrealized PnL (USD)'].sum()
+            st.caption(f"Total Unrealized PnL: ${total_unrealized:,.2f}")
+        else:
+            st.info("No unrealized PnL data available")
+
     # -------------------------------
     # Transactions table
     # -------------------------------
@@ -386,12 +645,9 @@ def main():
         validation_df = validate_pnl_calculation(df, realized_total, unrealized_total, total_gas_costs, breakdown_df)
         st.dataframe(validation_df, use_container_width=True)
 
-        st.subheader("📊 First 10 Transactions")
-        st.dataframe(df.head(10), use_container_width=True)
-
         st.subheader("📊 PnL Breakdown")
         st.dataframe(breakdown_df, use_container_width=True)
-
+        
     if not using_default:
         with st.expander("📂 View local cache files"):
             files = glob.glob(os.path.join(CACHE_DIR, chosen_wallet.lower(), "*.parquet"))
