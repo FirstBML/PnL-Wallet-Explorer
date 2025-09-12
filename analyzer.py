@@ -6,6 +6,9 @@ import requests
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
+from price_fetcher import get_token_price as fetch_token_price
+from price_fetcher import fill_missing_prices_batch
+import streamlit as st  
 
 # -------------------------------
 # Cache for prices
@@ -55,8 +58,12 @@ class AddressCache:
 # Extended Analyzer
 # -------------------------------
 class ExtendedMoralisAnalyzer:
-    def __init__(self, api_key: str, use_cache: bool = True, force_refresh: bool = False):
+    def __init__(self, api_key: str, use_cache: bool = True, force_refresh: bool = False, diagnostic_mode: bool = False):
         self.api_key = api_key
+        self.use_cache = use_cache
+        self.force_refresh = force_refresh
+        self.diagnostic_mode = diagnostic_mode
+
         self.base_url = "https://deep-index.moralis.io/api/v2"
         self.headers = {"Accept": "application/json", "X-API-Key": api_key}
 
@@ -71,6 +78,8 @@ class ExtendedMoralisAnalyzer:
 
         self.price_cache = PriceCache()
         self.address_cache = AddressCache()
+        self.price_cache = PriceCache()
+        self.address_cache = AddressCache()
 
     # -------------------------------
     # Fetch ERC20 Transfers
@@ -82,7 +91,9 @@ class ExtendedMoralisAnalyzer:
             response = requests.get(url, headers=self.headers, params=params)
             if response.status_code == 200:
                 return response.json().get('result', [])
-            return []
+            else:
+                print(f"Moralis API error: {response.status_code} - {response.text}")
+                return []
         except Exception as e:
             print(f"ERC20 transfer error: {e}")
             return []
@@ -109,111 +120,154 @@ class ExtendedMoralisAnalyzer:
     # PRICE FETCHER (Coingecko)
     # -------------------------------
     def get_price_usd(self, symbol: str, timestamp: str, token_address: str = None, blockchain: str = "ethereum") -> Optional[float]:
-        if not token_address and not symbol:
+    
+        if not symbol:
             return None
 
         date_str = timestamp.split("T")[0]
-        cache_key = f"{token_address or symbol}_{date_str}"
+        cache_key = f"{symbol}_{date_str}"
         cached = self.price_cache.get(cache_key)
         if cached:
+            if self.diagnostic_mode:
+                st.info(f"Cache hit for {symbol} on {date_str}: ${cached}")
             return cached
 
         cg_id = None
 
         try:
-            # Step 1: prefer contract lookup first
-            if token_address:
-                # Check local address cache
+            native_tokens = {
+                'eth': 'ethereum',
+                'bnb': 'binancecoin',
+                'matic': 'polygon',
+                'polygon': 'polygon',
+                'arbitrum': 'ethereum',
+                'optimism': 'ethereum',
+                'base': 'ethereum'
+            }
+
+            if symbol.lower() in native_tokens:
+                cg_id = native_tokens[symbol.lower()]
+            elif blockchain.lower() in native_tokens and symbol.lower() in ['eth', 'bnb', 'matic']:
+                cg_id = native_tokens[blockchain.lower()]
+
+            if not cg_id and token_address:
                 cached_cgid = self.address_cache.get(token_address.lower())
                 if cached_cgid:
                     cg_id = cached_cgid
+                    if self.diagnostic_mode:
+                        st.info(f"Address cache hit for {token_address}: {cg_id}")
                 else:
-                    # Query Coingecko contract API
                     url = f"https://api.coingecko.com/api/v3/coins/{blockchain}/contract/{token_address}"
                     r = requests.get(url)
+                    if self.diagnostic_mode:
+                        st.info(f"Response status: {r.status_code} for contract {token_address}")
                     if r.status_code == 200:
                         data = r.json()
                         cg_id = data.get("id")
                         if cg_id:
                             self.address_cache.set(token_address.lower(), cg_id)
+                            if self.diagnostic_mode:
+                                st.info(f"Resolved CoinGecko ID for {token_address}: {cg_id}")
+                    else:
+                        if self.diagnostic_mode:
+                            st.warning(f"Failed to resolve CoinGecko ID for {token_address}: {r.status_code}")
 
-            # Step 2: fallback to hardcoded mapping if contract failed
-            if not cg_id and symbol:
+            if not cg_id:
                 mapping = {
-                    "eth": "ethereum",
                     "weth": "weth",
                     "usdc": "usd-coin",
                     "usdt": "tether",
-                    "bnb": "binancecoin",
-                    "matic": "polygon"
+                    "dai": "dai",
+                    "wbtc": "wrapped-bitcoin",
+                    "link": "chainlink",
+                    "arb": "arbitrum"
                 }
                 cg_id = mapping.get(symbol.lower())
+                if not cg_id and self.diagnostic_mode:
+                    st.warning(f"⚠️ No CoinGecko ID for {symbol}")
 
             if not cg_id:
                 return None
 
-            # Step 3: fetch historical price
             url = f"https://api.coingecko.com/api/v3/coins/{cg_id}/history"
             params = {"date": datetime.strptime(date_str, "%Y-%m-%d").strftime("%d-%m-%Y")}
             r = requests.get(url, params=params)
+
+            if self.diagnostic_mode:
+                st.info(f"Response status: {r.status_code} for {symbol} history on {date_str}")
+
             if r.status_code == 200:
                 data = r.json()
                 price = data.get("market_data", {}).get("current_price", {}).get("usd")
                 if price:
                     self.price_cache.set(cache_key, price)
+                    if self.diagnostic_mode:
+                        st.info(f"Retrieved {symbol} price for {date_str}: ${price}")
                     return price
+                else:
+                    if self.diagnostic_mode:
+                        st.warning(f"No price data found for {symbol} on {date_str}")
+            else:
+                if self.diagnostic_mode:
+                    st.warning(f"CoinGecko API error for {symbol}: {r.status_code}")
+
         except Exception as e:
-            print(f"Price fetch error for {symbol} / {token_address}: {e}")
-            return None
+            if self.diagnostic_mode:
+                st.error(f"Price fetch error for {symbol}: {e}")
+
+        return None
 
     # -------------------------------
     # Get current prices for unrealized PnL
     # -------------------------------
     def get_current_prices(self, tokens: List[Dict]) -> Dict[str, float]:
-        """
-        Fetch current USD prices for a list of tokens.
-        tokens: List of dicts with keys 'symbol', 'address', 'blockchain'
-        Returns: dict mapping token_address -> current_price_usd
-        """
+    
         prices = {}
         coingecko_ids = []
-        token_map = {}  # cg_id -> token_address
-        
+        token_map = {}
+
         for token in tokens:
             symbol = token.get("symbol", "")
             address = token.get("address", "")
             blockchain = token.get("blockchain", "ethereum")
-            
+
             cache_key = f"current_{address.lower()}"
             cached = self.price_cache.get(cache_key)
             if cached:
                 prices[address] = cached
+                if self.diagnostic_mode:
+                    st.info(f"Cache hit for current price of {symbol} ({address}): ${cached}")
                 continue
-            
+
             cg_id = None
-            
-            # Try to resolve Coingecko ID
+
             if address:
                 cached_cgid = self.address_cache.get(address.lower())
                 if cached_cgid:
                     cg_id = cached_cgid
+                    if self.diagnostic_mode:
+                        st.info(f"Address cache hit for {address}: {cg_id}")
                 else:
                     try:
                         url = f"https://api.coingecko.com/api/v3/coins/{blockchain}/contract/{address}"
                         r = requests.get(url)
+                        if self.diagnostic_mode:
+                            st.info(f"Response status: {r.status_code} for contract {address}")
                         if r.status_code == 200:
                             data = r.json()
                             cg_id = data.get("id")
                             if cg_id:
                                 self.address_cache.set(address.lower(), cg_id)
+                                if self.diagnostic_mode:
+                                    st.info(f"Resolved CoinGecko ID for {address}: {cg_id}")
                     except Exception as e:
-                        print(f"Error resolving CG ID for {address}: {e}")
-            
-            # Fallback to symbol mapping
+                        if self.diagnostic_mode:
+                            st.error(f"Error resolving CG ID for {address}: {e}")
+
             if not cg_id and symbol:
                 mapping = {
                     "eth": "ethereum",
-                    "weth": "weth", 
+                    "weth": "weth",
                     "usdc": "usd-coin",
                     "usdt": "tether",
                     "bnb": "binancecoin",
@@ -222,12 +276,13 @@ class ExtendedMoralisAnalyzer:
                     "op": "optimism"
                 }
                 cg_id = mapping.get(symbol.lower())
-            
+                if not cg_id and self.diagnostic_mode:
+                    st.warning(f"⚠️ No CoinGecko ID for {symbol}")
+
             if cg_id:
                 coingecko_ids.append(cg_id)
                 token_map[cg_id] = address
-        
-        # Batch fetch current prices
+
         if coingecko_ids:
             try:
                 url = "https://api.coingecko.com/api/v3/simple/price"
@@ -236,6 +291,8 @@ class ExtendedMoralisAnalyzer:
                     "vs_currencies": "usd"
                 }
                 r = requests.get(url, params=params)
+                if self.diagnostic_mode:
+                    st.info(f"Response status: {r.status_code} for current prices batch")
                 if r.status_code == 200:
                     data = r.json()
                     for cg_id, price_data in data.items():
@@ -243,32 +300,44 @@ class ExtendedMoralisAnalyzer:
                             token_address = token_map[cg_id]
                             price = price_data["usd"]
                             prices[token_address] = price
-                            # Cache current prices briefly
                             cache_key = f"current_{token_address.lower()}"
                             self.price_cache.set(cache_key, price)
+                            if self.diagnostic_mode:
+                                st.info(f"Retrieved current price for {cg_id} ({token_address}): ${price}")
             except Exception as e:
-                print(f"Error fetching current prices: {e}")
-        
+                if self.diagnostic_mode:
+                    st.error(f"Error fetching current prices: {e}")
+
         return prices
     
     def get_native_token_price(self, chain_name: str, timestamp: str) -> Optional[float]:
-        """
-        Get USD price of native token (ETH, MATIC, BNB, etc.) at specific time
-        """
+        
         native_token_map = {
             'eth': 'ethereum',
-            'bsc': 'binancecoin', 
-            'polygon': 'matic-network',
-            'arbitrum': 'ethereum',  # Arbitrum uses ETH for gas
-            'optimism': 'ethereum',  # Optimism uses ETH for gas
-            'base': 'ethereum'       # Base uses ETH for gas
+            'bsc': 'binancecoin',
+            'polygon': 'polygon',
+            'arbitrum': 'ethereum',
+            'optimism': 'ethereum',
+            'base': 'ethereum'
         }
-        
+
         token_symbol = native_token_map.get(chain_name.lower(), 'ethereum')
-        return self.get_price_usd(token_symbol, timestamp, None, chain_name)
+        price = self.get_price_usd(token_symbol, timestamp, None, chain_name)
+
+        if price is None or price <= 0:
+            fallback_prices = {
+                'ethereum': 3000.0,
+                'polygon': 0.7,
+                'binancecoin': 500.0,
+            }
+            price = fallback_prices.get(token_symbol, 0)
+            if price > 0 and self.diagnostic_mode:
+                st.info(f"Using fallback price for {chain_name}: ${price}")
+
+        return price
 
     # -------------------------------
-    # Enrich transfers with USD price + Gas cost
+    # Enrich transfers with USD price + Gas cost - THIS WAS MISSING!
     # -------------------------------
     def get_detailed_data_for_wallet(self, wallet: str, max_per_chain: int = 50, chains: List[str] = None) -> pd.DataFrame:
         all_tx = []
@@ -281,6 +350,10 @@ class ExtendedMoralisAnalyzer:
             chain_id = self.chains[chain_name]
             print(f"Fetching ERC20 transfers on {chain_name}...")
             erc20_txs = self.get_erc20_transfers(wallet, chain=chain_id, limit=max_per_chain)
+            
+            if not erc20_txs:
+                print(f"No transactions found on {chain_name}")
+                continue
             
             for tx in erc20_txs:
                 try:
@@ -300,7 +373,30 @@ class ExtendedMoralisAnalyzer:
                     
                     # Calculate gas cost in USD
                     native_token_price = self.get_native_token_price(chain_name, timestamp)
+                    
+                    # Debug logging
+                    if gas_native > 0:
+                        print(f"Chain: {chain_name}, Gas Native: {gas_native}, Native Token Price: {native_token_price}")
+                    
                     gas_usd = gas_native * native_token_price if native_token_price else 0
+                    
+                    if gas_native > 0 and gas_usd == 0:
+                        print(f"WARNING: Gas cost calculation failed for tx {tx_hash}")
+                        print(f"  Chain: {chain_name}")
+                        print(f"  Gas Native: {gas_native}")
+                        print(f"  Native Token Price: {native_token_price}")
+
+                    # Determine transaction type
+                    from_addr = tx.get("from_address", "").lower()
+                    to_addr = tx.get("to_address", "").lower()
+                    wallet_lower = wallet.lower()
+                    
+                    if to_addr == wallet_lower:
+                        tx_type = "deposit"
+                    elif from_addr == wallet_lower:
+                        tx_type = "withdrawal"
+                    else:
+                        tx_type = "unknown"
 
                     enriched = {
                         "wallet": wallet,
@@ -314,7 +410,9 @@ class ExtendedMoralisAnalyzer:
                         "usd_value": usd_value,
                         "gas_cost_native": gas_native,
                         "gas_cost_usd": gas_usd,
-                        "transaction_type": "deposit" if tx.get("to_address", "").lower() == wallet.lower() else "withdrawal"
+                        "transaction_type": tx_type,
+                        "from_address": from_addr,
+                        "to_address": to_addr
                     }
                     all_tx.append(enriched)
                 except Exception as e:
@@ -324,12 +422,14 @@ class ExtendedMoralisAnalyzer:
             time.sleep(0.5)  # rate limit
 
         if not all_tx:
+            print("No transactions found across all chains")
             return pd.DataFrame()
 
         df = pd.DataFrame(all_tx)
         df['block_time'] = pd.to_datetime(df['block_time'])
         df = df.sort_values("block_time").reset_index(drop=True)
         
+        print(f"Successfully processed {len(df)} transactions")
         return df
 
 # -------------------------------
@@ -370,8 +470,13 @@ def calculate_pnl_improved(df, method="FIFO", analyzer=None):
         total_gas_cost += gas_cost
         
         # Skip invalid transactions
-        if qty <= 0 or price <= 0 or pd.isna(price):
-            print(f"Skipping invalid transaction: qty={qty}, price={price}, type={tx_type}")
+        if pd.isna(price) or price <= 0:
+            print(f"Missing/invalid price for {token}, skipping transaction")
+            continue
+
+        # Skip invalid transactions
+        if qty <= 0:
+            print(f"Skipping invalid transaction: qty={qty}, type={tx_type}")
             continue
         
         # Classify transactions into buys/sells
@@ -479,10 +584,10 @@ def calculate_pnl_improved(df, method="FIFO", analyzer=None):
     unrealized_pnl = 0.0
     token_holdings = {}
     current_prices = {}
-    
+
     # Collect tokens for current price lookup
     tokens_for_current_prices = []
-    
+
     if method in ["FIFO", "LIFO"]:
         for token, lots in positions.items():
             if lots:
@@ -494,7 +599,7 @@ def calculate_pnl_improved(df, method="FIFO", analyzer=None):
                         "address": token_row.get("token_address", ""),
                         "blockchain": token_row.get("blockchain", "ethereum")
                     })
-    
+
     elif method == "ACB":
         for token, (total_qty, _) in avg_costs.items():
             if total_qty > 0:
@@ -506,7 +611,7 @@ def calculate_pnl_improved(df, method="FIFO", analyzer=None):
                         "address": token_row.get("token_address", ""),
                         "blockchain": token_row.get("blockchain", "ethereum")
                     })
-    
+
     # Fetch current prices if analyzer is available
     if analyzer and tokens_for_current_prices:
         try:
@@ -514,11 +619,11 @@ def calculate_pnl_improved(df, method="FIFO", analyzer=None):
             print(f"Fetched current prices for {len(current_prices)} tokens")
         except Exception as e:
             print(f"Error fetching current prices: {e}")
-            for token in set(df["token_symbol"]):
-                token_df = df[df["token_symbol"] == token]
+            # Final fallback: Use last transaction prices
+            for token_info in tokens_for_current_prices:
+                token_df = df[df["token_symbol"] == token_info["symbol"]]
                 if not token_df.empty:
-                    token_addr = token_df.iloc[-1]["token_address"]
-                    current_prices[token_addr] = token_df.iloc[-1]["price_usd"]
+                    current_prices[token_info["address"]] = token_df.iloc[-1]["price_usd"]
     else:
         print("Using last transaction prices as current prices")
         for token in set(df["token_symbol"]):
@@ -619,8 +724,7 @@ def calculate_pnl_improved(df, method="FIFO", analyzer=None):
     print(f"Realized PnL: ${realized_pnl:.2f}")
     print(f"Unrealized PnL: ${unrealized_pnl:.2f}")
     print(f"Total Gas Costs: ${total_gas_cost:.2f}")
-    print(f"Net PnL (after gas): ${realized_pnl + unrealized_pnl - total_gas_cost:.2f}")
-    
+
     return realized_pnl, unrealized_pnl, total_gas_cost, breakdown_df
 
 # -------------------------------
@@ -659,10 +763,24 @@ def validate_pnl_calculation(df, realized_pnl, unrealized_pnl, total_gas_cost, b
 # -------------------------------
 # Simple token price fetcher (fallback)
 # -------------------------------
-def get_token_price(token_symbol: str) -> Optional[float]:
+# In analyzer.py, you should have something like this:
+
+def get_token_price(token_symbol: str, token_address: str = None, blockchain: str = None, block_time: pd.Timestamp = None) -> Optional[float]:
     """
-    Simple fallback function to get token prices.
+    Enhanced function to get token prices with multiple fallback strategies.
     """
+    # First try the advanced price fetcher
+    if token_address and blockchain:
+        price = fetch_token_price(
+            symbol=token_symbol,
+            address=token_address,
+            chain=blockchain,
+            block_time=block_time
+        )
+        if price is not None and price > 0:
+            return price
+    
+    # Fallback to simple mapping if advanced fetcher fails
     price_mapping = {
         "ETH": 3000.0,
         "BTC": 60000.0,
@@ -671,5 +789,11 @@ def get_token_price(token_symbol: str) -> Optional[float]:
         "DAI": 1.0,
         "WBTC": 60000.0,
         "WETH": 3000.0,
+        "ARB": 1.5,  # Add more tokens as needed
+        "MATIC": 0.7,
+        "BNB": 500.0,
+        "FDUSD": 1.0,
     }
+    
     return price_mapping.get(token_symbol.upper())
+

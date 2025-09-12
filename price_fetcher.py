@@ -1,117 +1,215 @@
-import os
-import json
-import time
-import requests
 import pandas as pd
+import requests
+import time
+import numpy as np
 from datetime import datetime
+import os
+import streamlit as st
+from dotenv import load_dotenv
 
-CACHE_FILE = "cache/token_prices.json"
+load_dotenv()
 
-# ---------------------------
-# Cache Helpers
-# ---------------------------
-def _load_cache():
-    if os.path.exists(CACHE_FILE):
+# Config
+COINGECKO_API_KEY = os.getenv("GECKO_API_KEY", "")
+COINGECKO_BASE_URL = "pro-api.coingecko.com" if COINGECKO_API_KEY else "api.coingecko.com"
+RATE_LIMIT_DELAY = 2
+PRICE_CACHE = {}
+
+# Scam filtering
+def is_likely_scam_token(token_symbol, token_address):
+    if not token_symbol or pd.isna(token_symbol):
+        return True
+    scam_indicators = [
+        'http://', 'https://', 'visit', 'claim', 'airdrop', 'free',
+        'generator', '://', 'www.', '.com', '.io', '.vip', '.supply',
+        'rarible', 'uniswap', 'reward', 'promo', 'bonus'
+    ]
+    token_lower = str(token_symbol).lower()
+    for indicator in scam_indicators:
+        if indicator in token_lower:
+            return True
+    if len(token_symbol) > 50:
+        return True
+    if any(ord(char) > 127 for char in token_symbol) and len(token_symbol) < 15:
+        return True
+    if token_address and len(token_address) != 42:
+        return True
+    return False
+
+# Update Config section
+COINGECKO_API_KEY = os.getenv("GECKO_API_KEY", "")
+COINGECKO_BASE_URL = "pro-api.coingecko.com" if COINGECKO_API_KEY else "api.coingecko.com"
+RATE_LIMIT_DELAY = 2
+PRICE_CACHE = {}
+
+# Update TOKEN_ID_OVERRIDES with more mappings
+TOKEN_ID_OVERRIDES = {
+    "USDC": "usd-coin",
+    "USDT": "tether",
+    "ARB": "arbitrum",
+    "wBTC": "wrapped-bitcoin",
+    "WETH": "weth",
+    "LINK": "chainlink",
+    "DAI": "dai"
+}
+
+def get_coin_id(blockchain: str, token_symbol: str, token_address: str = None) -> str:
+    """
+    Resolves CoinGecko coin ID from token details.
+    Prioritizes contract address lookup over symbol matching.
+    """
+    if not token_symbol or not token_address:
+        return None
+        
+    # 1. Try contract address lookup first
+    chain_platforms = {
+        'ethereum': 'ethereum',
+        'bsc': 'binance-smart-chain',
+        'polygon': 'polygon-pos',
+        'arbitrum': 'arbitrum-one',
+        'optimism': 'optimism',
+        'base': 'base'
+    }
+    
+    platform = chain_platforms.get(blockchain.lower())
+    if platform and token_address:
         try:
-            with open(CACHE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+            url = f"https://{COINGECKO_BASE_URL}/api/v3/coins/{platform}/contract/{token_address}"
+            headers = {"X-Cg-Pro-Api-Key": COINGECKO_API_KEY} if COINGECKO_API_KEY else {}
+            r = requests.get(url, headers=headers)
+            if r.status_code == 200:
+                return r.json().get('id')
+            elif r.status_code != 404:  # Log non-404 errors
+                st.warning(f"API error looking up {token_symbol} ({token_address}): {r.status_code}")
+        except Exception as e:
+            st.warning(f"Error looking up contract: {e}")
+    
+    # 2. Fallback to override mappings only for well-known tokens
+    if token_symbol.upper() in TOKEN_ID_OVERRIDES:
+        return TOKEN_ID_OVERRIDES[token_symbol.upper()]
+    
+    return None
+
+def get_market_chart_range(coin_id: str, start_date: datetime, end_date: datetime):
+    """Fetch price data for a date range."""
+    url = f"https://{COINGECKO_BASE_URL}/api/v3/coins/{coin_id}/market_chart/range"
+    params = {
+        "vs_currency": "usd",
+        "from": int(start_date.timestamp()),
+        "to": int(end_date.timestamp())
+    }
+    headers = {"X-Cg-Pro-Api-Key": COINGECKO_API_KEY} if COINGECKO_API_KEY else {}
+    
+    try:
+        st.info(f"Fetching prices for {coin_id} from {start_date} to {end_date}")
+        r = requests.get(url, params=params, headers=headers, timeout=30)
+        st.info(f"Response status: {r.status_code}")
+        
+        if r.status_code == 200:
+            data = r.json()
+            prices = {int(ts/1000): price for ts, price in data.get("prices", [])}
+            st.info(f"Retrieved {len(prices)} price points for {coin_id}")
+            if prices:
+                return prices
+            else:
+                st.warning(f"No prices returned for {coin_id} despite 200 status")
+                st.debug(f"Raw response: {data}")
+        elif r.status_code == 429:
+            st.error("Rate limit exceeded - please wait")
+            time.sleep(RATE_LIMIT_DELAY * 2)
+        else:
+            st.error(f"API error {r.status_code}: {r.text}")
+    except Exception as e:
+        st.error(f"Error fetching market chart for {coin_id}: {e}")
     return {}
 
-def _save_cache(cache):
-    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
-    with open(CACHE_FILE, "w") as f:
-        json.dump(cache, f)
-
-# In-memory cache
-_price_cache = _load_cache()
-
-def _cache_key(symbol: str, date: str | None = None):
-    return f"{symbol.upper()}_{date}" if date else symbol.upper()
-
-# ---------------------------
-# Coingecko API Helpers
-# ---------------------------
-def _fetch_coingecko_current(symbol: str):
-    url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol.lower()}&vs_currencies=usd"
-    resp = requests.get(url, timeout=10)
-    if resp.status_code == 200:
-        data = resp.json()
-        if symbol.lower() in data:
-            return float(data[symbol.lower()]["usd"])
-    return None
-
-def _fetch_coingecko_historical(symbol: str, date: str):
-    """Date format: DD-MM-YYYY (Coingecko requirement)."""
-    url = f"https://api.coingecko.com/api/v3/coins/{symbol.lower()}/history?date={date}"
-    resp = requests.get(url, timeout=10)
-    if resp.status_code == 200:
-        data = resp.json()
-        try:
-            return float(data["market_data"]["current_price"]["usd"])
-        except Exception:
-            return None
-    return None
-
-# ---------------------------
-# Moralis Fallback
-# ---------------------------
-def _fetch_moralis_price(address: str, chain: str):
-    api_key = os.getenv("MORALIS_API_KEY")
-    if not api_key:
+def assign_nearest_price(ts: datetime, price_dict: dict):
+    """Find nearest available price to the given timestamp."""
+    if not price_dict:
         return None
-    url = f"https://deep-index.moralis.io/api/v2/erc20/{address}/price?chain={chain}"
-    headers = {"X-API-Key": api_key}
-    resp = requests.get(url, headers=headers, timeout=10)
-    if resp.status_code == 200:
-        data = resp.json()
-        return float(data.get("usdPrice", 0)) or None
-    return None
+    target = int(ts.timestamp())
+    available_ts = np.array(list(price_dict.keys()))
+    nearest_idx = (np.abs(available_ts - target)).argmin()
+    nearest_ts = available_ts[nearest_idx]
+    return price_dict[nearest_ts]
 
-# ---------------------------
-# Public Functions
-# ---------------------------
-def get_token_price(symbol: str, address: str = None, chain: str = None, block_time: pd.Timestamp = None):
+def fill_missing_prices_batch(df):
     """
-    Return USD price of a token.
-    - Uses cache if available
-    - Falls back: Coingecko -> Moralis
-    - Supports historical (if block_time given)
+    Batch mode: fetches ranges instead of per-day history calls.
     """
+    if df.empty:
+        return df
 
-    if block_time is not None:
-        date_str = block_time.strftime("%d-%m-%Y")
-        cache_key = _cache_key(symbol, date_str)
-    else:
-        date_str = None
-        cache_key = _cache_key(symbol)
+    missing_rows = df[df['Price Status'] == '❌ Missing']
+    if missing_rows.empty:
+        st.success("All prices already available!")
+        return df
 
-    # 1. Check cache
-    if cache_key in _price_cache:
-        return _price_cache[cache_key]
+    legit_missing_rows = missing_rows[
+        ~missing_rows.apply(
+            lambda row: is_likely_scam_token(row['token_symbol'], row['token_address']),
+            axis=1
+        )
+    ]
 
-    price = None
+    if legit_missing_rows.empty:
+        st.info("No legitimate tokens with missing prices found.")
+        return df
 
-    # 2. Try Coingecko (historical or current)
-    try:
-        if date_str:
-            price = _fetch_coingecko_historical(symbol, date_str)
+    st.info(f"Batch fetching prices for {len(legit_missing_rows)} transactions...")
+
+    grouped = legit_missing_rows.groupby(["blockchain", "token_symbol", "token_address"])
+
+    for (blockchain, symbol, address), group in grouped:
+        coin_id = get_coin_id(blockchain, symbol, address)
+        if not coin_id:
+            st.warning(f"⚠️ No CoinGecko ID for {symbol}")
+            continue
+
+        start_date = group['block_time'].min() - pd.Timedelta(days=2)
+        end_date = group['block_time'].max() + pd.Timedelta(days=2)
+
+        cache_key = f"{coin_id}:{start_date}:{end_date}"
+        if cache_key in PRICE_CACHE:
+            price_dict = PRICE_CACHE[cache_key]
         else:
-            price = _fetch_coingecko_current(symbol)
-    except Exception:
-        pass
+            price_dict = get_market_chart_range(coin_id, start_date, end_date)
+            PRICE_CACHE[cache_key] = price_dict
 
-    # 3. Fallback Moralis
-    if price is None and address and chain:
-        try:
-            price = _fetch_moralis_price(address, chain)
-        except Exception:
-            pass
+        for idx, row in group.iterrows():
+            ts = row['block_time']
+            price = assign_nearest_price(ts, price_dict)
+            if price and price > 0:
+                df.at[idx, 'price_usd'] = price
+                df.at[idx, 'usd_value'] = row['amount'] * price
+                df.at[idx, 'Price Status'] = '✅ Available'
+            else:
+                st.warning(f"Could not assign price for {symbol} at {ts}")
 
-    # 4. Save to cache
-    if price is not None:
-        _price_cache[cache_key] = price
-        _save_cache(_price_cache)
+    # 👇 ensure this is ALWAYS reached
+    return df
 
-    return price
+# Wrapper for backward compatibility
+def fill_missing_prices(df):
+    return fill_missing_prices_batch(df)
+
+def get_token_price(blockchain: str, token_address: str, token_symbol: str, ts: datetime = None):
+    """
+    Simple wrapper for backwards compatibility.
+    Returns a single historical price (nearest available).
+    """
+    coin_id = get_coin_id(blockchain, token_symbol, token_address)
+    if not coin_id:
+        return None
+
+    if ts is None:
+        ts = datetime.utcnow()
+
+    # Use a 2-day window around timestamp
+    start_date = ts - pd.Timedelta(days=2)
+    end_date = ts + pd.Timedelta(days=2)
+
+    price_dict = get_market_chart_range(coin_id, start_date, end_date)
+    return assign_nearest_price(ts, price_dict)
+
+
