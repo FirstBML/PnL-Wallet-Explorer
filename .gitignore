@@ -1,0 +1,56 @@
+# ===============================
+# 🔑 Sensitive & Environment Files
+# ===============================
+.env
+*.env
+*.key
+*.secret
+
+# ===============================
+# 📦 Local Cache & Generated Files
+# ===============================
+price_cache.json
+address_to_cgid.json
+moralis_cache.json
+moralis_wallet_data.csv
+
+# Ignore any CSV exports you generate
+*.csv
+
+# ===============================
+# 🐍 Python Cache & Bytecode
+# ===============================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+
+# ===============================
+# 📚 Virtual Environment
+# ===============================
+# Ignore any local venv or conda environment
+WalletPnL/
+.venv/
+venv/
+env/
+ENV/
+Lib/
+Scripts/
+
+# ===============================
+# 📓 Jupyter Notebook Checkpoints
+# ===============================
+.ipynb_checkpoints/
+
+# ===============================
+# 🖼️ Logs & Temp Files
+# ===============================
+*.log
+*.tmp
+.DS_Store
+
+# ===============================
+# 🚀 Streamlit Deployment
+# ===============================
+.streamlit/secrets.toml

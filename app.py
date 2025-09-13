@@ -481,10 +481,20 @@ sample_df = generate_sample_data(n_days=7, txs_per_day=7)
 # -------------------------------
 # Setup
 # -------------------------------
+
 load_dotenv()
-API_KEY = os.getenv("MORALIS_API_KEY")
+
+# Try to get from Streamlit secrets first, then environment variables
+try:
+    API_KEY = st.secrets["MORALIS_API_KEY"]
+except (KeyError, FileNotFoundError):
+    # Fallback to environment variable for local development
+    API_KEY = os.getenv("MORALIS_API_KEY")
+
 if not API_KEY:
-    st.error("⚠️ Please add MORALIS_API_KEY to your .env file!")
+    st.error("⚠️ Please add MORALIS_API_KEY to your Streamlit secrets!")
+    st.info("For Streamlit Cloud: Go to Settings > Secrets and add your API key")
+    st.info("For local development: Add MORALIS_API_KEY to your .env file")
     st.stop()
 
 CACHE_DIR = "cache"
